@@ -25,8 +25,9 @@ from typing import Callable
 
 import numpy as np
 
-from . import audio
+from . import audio, drums
 from .music import KeyEstimate, estimate_key, format_time, pitch_class_weights
+from .synth import default_instrument_for
 
 log = logging.getLogger(__name__)
 
@@ -81,20 +82,32 @@ class Segment:
     words: list[Word] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(eq=False)  # compared by identity, so a Note can be kept in a set while it is edited
 class Note:
     start: float
     end: float
     pitch: int
     velocity: float  # 0..1
+    edited: bool = False  # added or changed by hand in Edit mode
+
+    def __post_init__(self) -> None:
+        # Always plain Python numbers. A numpy number stored here can crash Qt later, when the
+        # value is handed to one of its widgets.
+        self.start, self.end = float(self.start), float(self.end)
+        self.pitch, self.velocity = int(self.pitch), float(self.velocity)
 
 
 @dataclass
 class Track:
+    """One part of the music (the full mix, or one stem) with its notes."""
     name: str
     color: str
     notes: list[Note]
-    visible: bool = True
+    visible: bool = True        # shown and heard (false when muted, or when another part is solo)
+    muted: bool = False
+    solo: bool = False
+    instrument: str = "piano"   # the sound used when the notes are played back
+    audio: str | None = None    # the recording for this part (a stem, or the original file)
 
 
 @dataclass
@@ -108,7 +121,7 @@ class Options:
     sensitivity: int = 50  # 0..100, higher finds more notes
     min_note_ms: int = 120
     separate: bool = False
-    note_stems: list[str] = field(default_factory=lambda: ["Vocals", "Bass", "Other"])
+    note_stems: list[str] = field(default_factory=lambda: ["Vocals", "Bass", "Other", "Drums"])
     device: str = "cpu"  # "cpu" or "cuda"
 
 
@@ -308,8 +321,17 @@ class Analyzer:
             label = "the full mix" if name == "Full mix" else name.lower()
             progress.start(f"notes:{name}", f"Finding notes in {label}")
             notes = self._notes(path, name)
-            tracks.append(Track(name, TRACK_COLORS.get(name, "#69A7E0"), notes))
+            tracks.append(Track(name, TRACK_COLORS.get(name, "#69A7E0"), notes,
+                                instrument=default_instrument_for(name), audio=path))
             progress.update(1.0)
+
+        # Every stem is a part you can mute, even when no notes were looked for in it.
+        have = {t.name for t in tracks}
+        for name in STEM_ORDER:
+            if name in files and name not in have:
+                tracks.append(Track(name, TRACK_COLORS.get(name, "#69A7E0"), [],
+                                    instrument=default_instrument_for(name), audio=files[name]))
+        tracks.sort(key=lambda t: (STEM_ORDER.index(t.name) if t.name in STEM_ORDER else -1))
 
         # 6. Key
         pitched = [n for t in tracks if t.name != "Drums" for n in t.notes]
@@ -413,7 +435,14 @@ class Analyzer:
                 progress.update(0.0, "GPU not usable for Whisper, using the CPU instead")
         return attempt("cpu")
 
+    def _drum_hits(self, wav: str) -> list[Note]:
+        samples = audio.decode(wav, 22050, 1)[0]
+        hits = drums.detect_hits(samples, 22050, self.options.sensitivity)
+        return [Note(t, t + drums.HIT_LENGTH, pitch, strength) for t, pitch, strength in hits]
+
     def _notes(self, wav: str, name: str) -> list[Note]:
+        if name == "Drums":
+            return self._drum_hits(wav)
         model, predict = _load_pitch_model()
         o = self.options
         s = min(max(o.sensitivity, 0), 100) / 100.0

@@ -31,7 +31,8 @@ COLORS = {
 
 STYLE = """
 QWidget#Inspector {{ background: {panel}; }}
-QScrollArea#InspectorScroll {{ background: {panel}; border: none; border-right: 1px solid {line}; }}
+QFrame#InspectorFrame {{ background: {panel}; border: none; border-right: 1px solid {line}; }}
+QScrollArea#InspectorPage {{ background: {panel}; border: none; }}
 QFrame#Section {{ border: none; border-bottom: 1px solid {line}; }}
 QLabel#SectionTitle {{ font-weight: 600; color: {text}; }}
 QLabel#Hint, QLabel#Meta {{ color: {muted}; }}
@@ -63,6 +64,26 @@ QStatusBar QLabel {{ color: {muted}; }}
 QProgressBar {{ background: {base}; border: 1px solid {line}; border-radius: 3px; max-height: 10px; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 2px; }}
 QToolTip {{ background: {raised}; color: {text}; border: 1px solid {line}; padding: 5px; }}
+QWidget#Toolbar {{ background: {window}; border-bottom: 1px solid {line}; }}
+QToolButton#MuteButton, QToolButton#SoloButton, QToolButton#KeyButton {{
+    background: {raised}; border: 1px solid {line}; border-radius: 4px; color: {muted}; font-weight: 700;
+}}
+QToolButton#MuteButton, QToolButton#SoloButton {{
+    min-width: 24px; max-width: 24px; min-height: 22px; max-height: 22px;
+}}
+QToolButton#KeyButton {{ min-height: 24px; padding: 0px 2px; }}
+QToolButton#MuteButton:checked {{ background: #D9645B; border-color: #D9645B; color: #22110F; }}
+QToolButton#SoloButton:checked {{ background: {accent}; border-color: {accent}; color: {accent_text}; }}
+QToolButton#KeyButton:checked {{ background: {select}; border-color: #5E86B3; color: #FFFFFF; }}
+QToolButton#ModeButton {{
+    background: {raised}; border: 1px solid {line}; border-radius: 4px; padding: 4px 12px; font-weight: 600;
+}}
+QToolButton#ModeButton:checked {{ background: {accent}; border-color: {accent}; color: {accent_text}; }}
+QToolButton#LoopButton {{
+    background: {raised}; border: 1px solid {line}; border-radius: 4px; padding: 4px 10px; font-weight: 600;
+}}
+QToolButton#LoopButton:checked {{ background: #5CC6C0; border-color: #5CC6C0; color: #0E2220; }}
+QToolButton#LoopButton:disabled, QToolButton#ModeButton:disabled {{ color: #646D79; }}
 """.format(**COLORS)
 
 
@@ -150,6 +171,16 @@ def run_check() -> int:
     report("Whisper", lambda: __import__("faster_whisper").__version__)
     report("ONNX Runtime", lambda: __import__("onnxruntime").__version__)
     report("librosa", lambda: __import__("librosa").__version__)
+
+    def instrument_sounds() -> str:
+        import numpy
+        import scipy
+        from . import synth
+        if len(synth.render_single("piano", 60, 0.7, 0.3)) == 0:
+            raise RuntimeError("the piano did not make any sound")
+        return f"ok (numpy {numpy.__version__}, scipy {scipy.__version__})"
+
+    report("Instrument sounds", instrument_sounds)
 
     def basic_pitch() -> str:
         logging.disable(logging.WARNING)

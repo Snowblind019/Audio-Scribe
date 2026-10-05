@@ -4,8 +4,13 @@ Open any audio or video file and Audio Scribe will:
 
 - Write out the words with a timestamp for every word (speech or song lyrics)
 - Find the notes and show them on a piano roll timeline, like the Key Editor in Cubase
+- Find the drum hits (kick, snare, hi-hat) when you split a song into stems
 - Estimate the key and tempo, and show which notes are used the most
 - Optionally split a song into vocals, bass, drums, and other first, for cleaner results
+- Let you show only one scale, mute or solo any part, and hear the result
+- Let you drag a selection over any stretch of the song to see it in detail and loop it
+- Let you fix, move, and add notes (after you press Edit), then export the changed notes
+- Play the notes back on a piano, strings, guitars, accordion, drums, and more
 
 It runs completely on your own computer. Nothing is uploaded anywhere. The only time it goes online is to download a model the first time you use it.
 
@@ -82,7 +87,7 @@ The first run of each Whisper model downloads it, so that run takes longer. Afte
 
 **Stems**
 - **Split into stems first:** separates the song before analyzing.
-- **Find notes in:** which stems to look for notes in. Drums are off by default since drums don't have real pitches.
+- **Find notes in:** which stems to look for notes in. For Drums it finds drum hits (kick, snare, and hi-hat) instead of pitches. If you used an earlier version, your saved choice may have Drums off, so tick it once.
 
 **Run on:** CPU or NVIDIA GPU. The GPU choice is greyed out if no NVIDIA GPU with CUDA is found. If the GPU fails for Whisper, it falls back to the CPU on its own.
 
@@ -94,6 +99,7 @@ The first run of each Whisper model downloads it, so that run takes longer. Afte
 - Click a note to jump there. Click the ruler or empty space to move the playhead. Drag on the ruler to scrub.
 - Click a key on the keyboard to highlight every time that note is played. Click it again or press Esc to clear.
 - The grid lines follow the detected beat, with a stronger line every 4 beats.
+- Drum hits show as short blocks on the rows for kick (C2), snare (D2), and hi-hat (F#2).
 
 | Action | How |
 |---|---|
@@ -105,18 +111,74 @@ The first run of each Whisper model downloads it, so that run takes longer. Afte
 | Fit the whole file | Ctrl+0, or the Fit button |
 | Open a file | Ctrl+O |
 | Analyze | Ctrl+Enter or F5 |
+| Zoom to the selected span, and back | Z |
+| Loop the selected span on or off | L |
+| Edit mode on or off | E |
+| Clear the span or selection | Esc |
+| Undo and redo (Edit mode) | Ctrl+Z and Ctrl+Y |
 
 **Follow** keeps the playhead in view while playing. Turn it off to look around freely.
 
-When stems were made, the **Play** menu in the bottom bar lets you switch between the original and each stem without losing your place.
+### Parts and sound
+
+After an analysis, the **Parts and sound** tab at the top of the left panel has three sections.
+
+**Parts.** Each part (Vocals, Bass, Other, Drums, or Full mix if you did not split into stems) has an **M** button and an **S** button.
+
+- **M** (mute) hides the part's notes and silences it. Mute the vocals and you hear only the music. Mute the drums and you hear everything else. Mute Drums and Vocals and you hear only the bass and the rest.
+- **S** (solo) shows and plays only the soloed parts. This also replaces the old stem menu in the bottom bar, since soloing a stem plays just that stem.
+- **Sound** is the instrument that part's notes use when they are played back: Soft piano (the default), Grand piano, Electric piano, Violin, Strings (section), Cello, Acoustic guitar, Electric guitar, Bass guitar, Harp, Accordion, Organ, Flute, Clarinet, Trumpet, Choir, Warm pad, Music box, and Drum kit. Drums always use the drum kit. Your choices are remembered for next time. Picking one plays a short sample so you can hear it.
+
+What you hide is hidden everywhere: the piano roll, the Notes tab, the Summary and Selection tabs, playback, and the exports.
+
+**Show only.** Pick a scale to see only its notes, for example C major, A minor, or a pentatonic scale. Choose the key note and the scale, or click the little keys to pick any set of notes you like. **Show** can flip it to the notes outside the scale, which is a quick way to find wrong notes. **Use the detected key** fills it in from the key the app found. **From** and **to** limit the range of notes, and **Show every note** puts everything back. Drum hits ignore this filter because they have no pitch. Mute the drums to hide them.
+
+**Sound.** The **Play** menu in the bottom bar picks what you hear:
+
+- **Recording** plays the original audio, minus any part you muted.
+- **Notes on instruments** plays the notes the app found, on the instruments you chose.
+- **Recording and notes** plays both together. **Notes level** sets how loud the instruments are, and **Add room sound** adds a little reverb so they don't sound dry.
+
+The first time you change what is muted or which instrument is used, the app builds the new sound in the background (a few seconds for a full song) while the old one keeps playing, then switches over at the same spot. Sounds it has already built come back instantly.
+
+### Selecting a span, zooming, and looping
+
+Drag across the piano roll to select a span of time. It is shaded, and its length shows at the top. Drag either edge to adjust it. The toolbar above the piano roll then lets you:
+
+- **Zoom to span** (or press Z, or double-click inside the span) to fill the piano roll with just that stretch so you can see it in more detail. Press it again (it says **Zoom back**) to return.
+- **Loop** (or press L) to play the span over and over. It can be turned on and off at any time, and the span stays selected when it is off. Playback starts at the start of the span.
+- **Clear** (or press Esc) to remove the span.
+- **Snap** (to the beat, half beat, or quarter beat) makes the span edges, and moved notes, land on the beat grid.
+
+The **Selection** tab shows details for the span: its length in seconds, beats, and bars, the key and range in it, how many notes each part plays, which note is played most, a chart of how long each note sounds, a list of every note used, and a rough guess at the chords as they change. The **Notes** tab follows the span too, unless you uncheck **Only the selected span**.
+
+### Editing notes
+
+Notes cannot be changed until you press **Edit notes** (or E), so nothing moves by accident. The piano roll gets an amber border and a small EDIT badge so you can tell it is on.
+
+| Action | How |
+|---|---|
+| Move a note in time or pitch | Drag it |
+| Make it longer or shorter | Drag its right edge |
+| Add a note | Double-click empty space. It goes into the part chosen in **Add to** |
+| Delete notes | Select them, then press Delete |
+| Select several | Drag a box on empty space, or Ctrl or Shift + click. Ctrl+A selects all |
+| Nudge selected notes | Arrow keys (up and down are a semitone, left and right are a small step, or one snap step). Hold Shift for an octave or a bigger step |
+| Change how loud | Select notes, then change the **%** box |
+| Select a span while editing | Hold Shift and drag on empty space |
+| Undo and redo | Ctrl+Z and Ctrl+Y, or the Undo and Redo buttons |
+| Put everything back | **Revert all** |
+
+Moving a note plays it, so you can hear where it lands. Edited and added notes are marked "Changed by hand" when you hover them. Turn Edit off again and the notes are locked.
+
+Edits change the notes the app found, not the recording. To hear them, set **Play** to **Notes on instruments** or **Recording and notes**. Edits are kept in memory only, so export before you open another file. The app asks first if you try to close with unexported changes.
 
 ### Tabs
 
 - **Transcript:** each line with its start time. Click a line to jump there. The current line highlights while playing. Copy text copies the whole thing.
-- **Notes:** every note found, with track, start, length, and strength. Click a column header to sort. Click a row to jump to that note.
+- **Notes:** every note shown, with part, start, length, and strength. Click a column header to sort. Click a row to jump to that note.
 - **Summary:** key, tempo, range, and counts, a chart of how much time each note gets (notes in the key are brighter, the root note is amber), and a list of every note used. Clicking a note in that list highlights it in the piano roll.
-
-The Tracks section on the left lets you show or hide each track.
+- **Selection:** the details for the selected span, described above.
 
 ### Export
 
@@ -125,17 +187,24 @@ The Export button at the top right has:
 - **Transcript as text (.txt)**
 - **Transcript as subtitles (.srt)** for video players and editors
 - **Lyrics with timing (.lrc)** for music players that show synced lyrics
-- **Notes as MIDI (.mid)** with one track per stem and the detected tempo written in, so the notes line up with the bar grid in Cubase or any other DAW
+- **Notes as MIDI (.mid)** with one track per part and the detected tempo written in, so the notes line up with the bar grid in Cubase or any other DAW. Each track carries the General MIDI instrument that matches the Sound you picked (flute, cello, and so on), and the drums go on the drum channel.
 - **Notes as spreadsheet (.csv)**
 - **Stems as WAV files**
+- **Recording or notes as WAV (what you hear)** saves exactly what the Play menu is playing right now, for example the song without the vocals, or just the notes on a piano.
 
-MIDI and CSV only include the tracks that are currently shown.
+What you export matches what you see. Muted parts are left out, the scale filter applies, and any notes you edited are the edited ones.
 
 ## How accurate is it?
 
 **Words:** very good on clear speech. Songs are harder, since singing, effects, and loud music all get in the way. Stem separation plus picking the language plus a bigger model gives the best results.
 
 **Notes:** very good on a single instrument or a clean voice. Full mixes are much harder for any program, Cubase's own audio to MIDI included. Expect some extra notes, especially octave copies of loud notes. Stem separation helps the most. After that, lower the sensitivity and raise the shortest note length.
+
+**Drums:** hits are found by watching how fast the low, middle, and high parts of the sound jump up, which separates kicks, snares, and hi-hats well in clean drum stems. It has only been checked on generated drum audio so far, so on real recordings expect some missed ghost notes and the odd wrong hit, especially with cymbal crashes or heavy bleed. Stem separation helps a lot. Sensitivity applies to drums too.
+
+**Instrument sounds** are made by the app itself from math (additive and physical modelling), not from recordings, so there is nothing extra to download. They are meant for checking notes and hearing a part on a different instrument, not for finished music. The piano is soft and mellow. Real sample libraries sound richer.
+
+**Chords** in the Selection tab are a rough guess from the notes in each beat or two. Treat them as a starting point.
 
 **Key and tempo** are estimates. The key is based on the notes found, so a song can show as its relative major or minor (C major and A minor share the same notes). The summary says how sure it is and names the runner up when it's close.
 
@@ -178,7 +247,7 @@ To move to newer versions later, regenerate the lists from the `.in` files with 
 | Log file | `~/.cache/audio-scribe/audio-scribe.log` | `%LOCALAPPDATA%\audio-scribe\audio-scribe.log` |
 | Settings | `~/.config/AudioScribe` | Registry, `HKCU\Software\AudioScribe` |
 
-Temporary audio is deleted when you close the app or analyze another file.
+Temporary audio (including the sounds built for playback) is deleted when you close the app or analyze another file. Your instrument choices are saved in the settings.
 
 Rough Whisper model sizes: Small is about 500 MB, Large turbo about 1.6 GB, and Large about 3 GB.
 
@@ -224,11 +293,14 @@ audio-scribe/
   audioscribe/
     app.py                   startup, theme, --check
     window.py                main window
-    piano_roll.py            the piano roll timeline
-    widgets.py               summary tab and chart
+    piano_roll.py            the piano roll timeline, span, loop, and editing
+    widgets.py               parts list, scale filter, summary and selection tabs
     engine.py                the analysis steps
+    drums.py                 finding drum hits
     audio.py                 reading audio and video files
-    music.py                 note names, key estimation
+    music.py                 note names, scales, chords, key estimation
+    synth.py                 the instrument sounds
+    mixer.py                 builds the audio that plays (recording, notes, or both)
     exporters.py             txt, srt, lrc, MIDI, CSV
     icon.py                  the app icon
 ```

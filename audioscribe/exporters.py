@@ -6,10 +6,11 @@ import csv
 import io
 from pathlib import Path
 
+from . import synth
 from .music import note_name
 
-# General MIDI programs (0-based) so each track sounds roughly right in a DAW.
-_PROGRAMS = {"Vocals": 53, "Bass": 33, "Other": 0, "Full mix": 0, "Drums": 0}
+# General MIDI programs (0-based) used when a track has no instrument chosen.
+_PROGRAMS = {"Vocals": 53, "Bass": 33, "Other": 0, "Full mix": 0}
 
 
 def _srt_time(t: float) -> str:
@@ -62,7 +63,10 @@ def save_midi(tracks, path: str | Path, tempo: float | None) -> None:
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(tempo) if tempo else 120.0)
     for track in tracks:
-        inst = pretty_midi.Instrument(program=_PROGRAMS.get(track.name, 0), name=track.name)
+        is_drum = track.name == "Drums" or getattr(track, "instrument", None) == synth.DRUM_KEY
+        chosen = synth.BY_KEY.get(getattr(track, "instrument", None))
+        program = chosen.program if chosen is not None and not is_drum else _PROGRAMS.get(track.name, 0)
+        inst = pretty_midi.Instrument(program=program, is_drum=is_drum, name=track.name)
         for n in track.notes:
             velocity = max(1, min(127, int(round(30 + 97 * n.velocity))))
             inst.notes.append(pretty_midi.Note(velocity=velocity, pitch=int(n.pitch),
