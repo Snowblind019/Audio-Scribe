@@ -1,0 +1,6 @@
+# Basic Pitch (note detection) is installed without its own dependency list.
+# Its listed dependencies pull in an old TensorFlow that has no builds for
+# current Python versions. Audio Scribe runs its model through onnxruntime
+# instead, and every package it actually needs is in requirements.txt.
+basic-pitch==0.4.0 \
+    --hash=sha256:738adb503aae7fdfc7d1e1511aa0ce35052315f260a19531ef4c356708425db0

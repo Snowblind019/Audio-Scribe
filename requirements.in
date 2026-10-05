@@ -1,0 +1,12 @@
+# Top-level packages for Audio Scribe. requirements.txt is generated from this
+# file with every package pinned and hash-checked (see README, Security).
+PySide6==6.11.2
+faster-whisper==1.2.1
+av==18.1.0
+onnxruntime==1.30.0
+numpy==2.5.3
+scipy==1.18.1
+librosa==1.0.0
+resampy==0.4.3
+mir_eval==0.8.2
+pretty_midi==0.2.11.post0

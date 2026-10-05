@@ -1,0 +1,9 @@
+# Optional stem separation. Installed with --no-deps from the hash-locked
+# requirements-stems.txt, so only what Audio Scribe actually uses gets in.
+# PyTorch is installed separately from the official PyTorch index (pinned).
+# Left out on purpose: sphn and lameenc (only used by Demucs's own file
+# reading and command-line tool, which Audio Scribe never calls).
+demucs==4.1.0
+einops==0.8.2
+julius==0.2.8
+safetensors==0.8.0
