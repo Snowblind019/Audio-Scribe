@@ -1,5 +1,7 @@
 # Audio Scribe
 
+https://github.com/user-attachments/assets/bb6e6690-f1bb-4221-bea3-9f0397f0036e
+
 Open any audio or video file and Audio Scribe will:
 
 - Write out the words with a timestamp for every word (speech or song lyrics)
