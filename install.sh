@@ -8,6 +8,7 @@
 #   ./install.sh --with-youtube  also install YouTube download (yt-dlp and Deno)
 #   ./install.sh --no-youtube    skip YouTube download without asking
 #   ./install.sh --update-youtube  get the newest yt-dlp and Deno (when YouTube changed)
+#   ./install.sh --update        what the in-app updater runs: no questions, keep the optional parts as they are
 #   ./install.sh --yes           accept the default answer for every question
 #   ./install.sh --uninstall     remove the launcher, menu entry, and .venv
 #
@@ -41,6 +42,7 @@ STEMS="ask"
 YOUTUBE="ask"
 GPU="cpu"
 ASSUME_YES=0
+UPDATE=0
 UNINSTALL=0
 UV=""
 
@@ -49,7 +51,7 @@ note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33mWarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
 
 confirm() {
     # confirm "Question" y|n   (second argument is the default)
@@ -82,6 +84,7 @@ for arg in "$@"; do
         --no-youtube)     YOUTUBE="no" ;;
         --update-youtube) YOUTUBE="update" ;;
         -y|--yes)     ASSUME_YES=1 ;;
+        --update)     UPDATE=1; ASSUME_YES=1 ;;
         --uninstall)  UNINSTALL=1 ;;
         -h|--help)    usage; exit 0 ;;
         *) usage; die "Unknown option: $arg" ;;
@@ -169,7 +172,7 @@ find_uv() {
 
 uv_install() { "$UV" pip install --python "$PY" "$@"; }
 
-check_qt_libs
+[ "$UPDATE" -eq 1 ] || check_qt_libs
 find_uv
 note "Using uv at $UV"
 
@@ -186,6 +189,14 @@ say "Installing the app's packages (first time is a few hundred MB)"
 # --require-hashes: every package must match the SHA-256 in the file or nothing installs.
 uv_install --require-hashes -r "$APP_DIR/requirements.txt"
 uv_install --require-hashes --no-deps -r "$APP_DIR/requirements-nodeps.txt"
+
+has_module() { "$PY" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$1') else 1)" 2>/dev/null; }
+
+if [ "$UPDATE" -eq 1 ]; then
+    # Keep the optional parts the way they are: update the ones that are installed, skip the rest.
+    if has_module demucs; then STEMS="yes"; else STEMS="no"; fi
+    if has_module yt_dlp; then YOUTUBE="yes"; else YOUTUBE="no"; fi
+fi
 
 # 4. Optional stem separation ----------------------------------------------------------
 if [ "$STEMS" = "ask" ]; then

@@ -1,0 +1,3 @@
+# Audio Scribe update signing key (public half).
+# Empty until the maintainer runs: python tools/release.py keygen
+# Until then the app can't check for updates.

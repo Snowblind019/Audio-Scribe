@@ -323,6 +323,7 @@ class ExtrasMixin:
         if self.source_path is None:
             self.file_label.setText(tr("No file open yet."))
         self._fit_export_button()
+        self._retranslate_update()
         self._update_span_controls(self.roll.span)
         self.roll.refresh()
         self.scale_filter.refresh_names()

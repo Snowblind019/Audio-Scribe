@@ -12,6 +12,7 @@ Options:
     -WithYouTube  also install YouTube download (yt-dlp and Deno)
     -NoYouTube    skip YouTube download without asking
     -UpdateYouTube  get the newest yt-dlp and Deno (when YouTube changed)
+    -Update       what the in-app updater runs: no questions, keep the optional parts as they are
     -Yes          accept the default answer for every question
     -Uninstall    remove the shortcuts and the .venv and .tools folders
 
@@ -26,6 +27,7 @@ param(
     [switch]$NoYouTube,
     [switch]$UpdateYouTube,
     [switch]$Yes,
+    [switch]$Update,
     [switch]$Uninstall
 )
 
@@ -165,6 +167,21 @@ Write-Step "Installing the app's packages (first time is a few hundred MB)"
 Invoke-Uv @('--require-hashes', '-r', (Join-Path $AppDir 'requirements.txt')) 'Installing packages'
 Invoke-Uv @('--require-hashes', '--no-deps', '-r', (Join-Path $AppDir 'requirements-nodeps.txt')) 'Installing Basic Pitch'
 
+function Test-Module([string]$Name) {
+    $ErrorActionPreference = 'Continue'
+    & $Py -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$Name') else 1)" 2>$null | Out-Null
+    $found = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = 'Stop'
+    return $found
+}
+
+if ($Update) {
+    # Keep the optional parts the way they are: update the ones that are installed, skip the rest.
+    $Yes = $true
+    if (Test-Module 'demucs') { $WithStems = $true } else { $NoStems = $true }
+    if (Test-Module 'yt_dlp') { $WithYouTube = $true } else { $NoYouTube = $true }
+}
+
 # 3. Optional stem separation ----------------------------------------------------------------
 $installStems = $false
 if ($WithStems) {
@@ -253,7 +270,9 @@ function New-AppShortcut([string]$Path) {
 
 New-AppShortcut $StartMenuLink
 Write-Note 'Added to the Start menu.'
-if (Confirm-Choice 'Add a desktop shortcut too?' $true) {
+if ($Update) {
+    if (Test-Path $DesktopLink) { New-AppShortcut $DesktopLink }
+} elseif (Confirm-Choice 'Add a desktop shortcut too?' $true) {
     New-AppShortcut $DesktopLink
     Write-Note 'Added a desktop shortcut.'
 }

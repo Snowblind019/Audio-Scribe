@@ -943,4 +943,55 @@ RO: dict[str, str] = {
     "The download is too large.": "Descărcarea este prea mare.",
     "The download has no audio.": "Descărcarea nu are sunet.",
     "The download came in an unexpected format.": "Descărcarea a venit într-un format neașteptat.",
+
+    # Updates
+    "Updates": "Actualizări",
+    "You have version {version}.": "Ai versiunea {version}.",
+    "Check for updates when Audio Scribe opens": "Caută actualizări când pornește Audio Scribe",
+    "Looks at most once a day. Only the version number and the signed list of files are fetched from GitHub. Nothing about you or your files is sent.":
+        "Caută cel mult o dată pe zi. De pe GitHub se iau doar numărul versiunii și lista semnată de fișiere. Nu se trimite nimic despre tine sau fișierele tale.",
+    "Check for updates": "Caută actualizări",
+    "Updated to Audio Scribe {version}.": "Actualizat la Audio Scribe {version}.",
+    "The update didn't finish.": "Actualizarea nu s-a terminat.",
+    "Checking for updates...": "Se caută actualizări...",
+    "You have the newest version ({version}).": "Ai cea mai nouă versiune ({version}).",
+    "Audio Scribe {new} is available. You have {old}.": "Audio Scribe {new} este disponibil. Tu ai {old}.",
+    "Update now? It downloads the new version, checks its signature, then closes, updates itself and opens again.":
+        "Actualizezi acum? Descarcă versiunea nouă, îi verifică semnătura, apoi se închide, se actualizează și se deschide din nou.",
+    "Update now": "Actualizează acum",
+    "Not now": "Nu acum",
+    "Downloading Audio Scribe {version}...": "Se descarcă Audio Scribe {version}...",
+    "The update was not installed.": "Actualizarea nu a fost instalată.",
+    "Closing to install the update...": "Se închide pentru a instala actualizarea...",
+    "The update was not installed because the app stayed open. Check for updates again when you're ready.":
+        "Actualizarea nu a fost instalată pentru că aplicația a rămas deschisă. Caută din nou actualizări când ești gata.",
+    "This copy is a git checkout. Update it with git pull instead.":
+        "Această copie este un depozit git. Actualizeaz-o cu git pull.",
+    "The app folder can't be written to, so it can't update itself.":
+        "În dosarul aplicației nu se poate scrie, așa că nu se poate actualiza singură.",
+    "Updates aren't set up in this copy of Audio Scribe.": "Actualizările nu sunt configurate în această copie a Audio Scribe.",
+    "The update information is damaged.": "Informațiile despre actualizare sunt deteriorate.",
+    "The update information is not for Audio Scribe.": "Informațiile despre actualizare nu sunt pentru Audio Scribe.",
+    "The update information lists a file it shouldn't.": "Informațiile despre actualizare conțin un fișier care nu are ce căuta acolo.",
+    "Refused to download from an unexpected address.": "Descărcarea de la o adresă neașteptată a fost refuzată.",
+    "The download is larger than expected.": "Descărcarea este mai mare decât era de așteptat.",
+    "No update information was found on GitHub yet.": "Încă nu există informații despre actualizări pe GitHub.",
+    "GitHub answered with an error. Try again later.": "GitHub a răspuns cu o eroare. Încearcă mai târziu.",
+    "Could not reach GitHub. Check your internet connection and try again.":
+        "Nu s-a putut ajunge la GitHub. Verifică conexiunea la internet și încearcă din nou.",
+    "The update information on GitHub is not signed by the Audio Scribe key, so it was ignored.":
+        "Informațiile despre actualizare de pe GitHub nu sunt semnate cu cheia Audio Scribe, așa că au fost ignorate.",
+    "The download is damaged.": "Descărcarea este deteriorată.",
+    "The newest code on GitHub doesn't match its signed file list yet. Try again later.":
+        "Cel mai nou cod de pe GitHub nu se potrivește încă cu lista lui semnată de fișiere. Încearcă mai târziu.",
+    "The downloaded code has a different version than its signed file list.":
+        "Codul descărcat are altă versiune decât lista lui semnată de fișiere.",
+    "Something went wrong while checking for updates. The log file has details.":
+        "Ceva n-a mers bine la căutarea actualizărilor. Fișierul jurnal are detalii.",
+    "The update was not installed because Audio Scribe did not close.":
+        "Actualizarea nu a fost instalată pentru că Audio Scribe nu s-a închis.",
+    "The update could not be installed, so nothing was changed.":
+        "Actualizarea nu a putut fi instalată, așa că nu s-a schimbat nimic.",
+    "Audio Scribe was updated, but updating its packages failed. Run the installer again to finish (install.sh, or install.bat on Windows).":
+        "Audio Scribe a fost actualizat, dar actualizarea pachetelor a eșuat. Rulează din nou instalarea ca să termini (install.sh, sau install.bat pe Windows).",
 }

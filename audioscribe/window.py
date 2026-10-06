@@ -31,6 +31,7 @@ from .music import NoteFilter, estimate_key, format_time, note_label, note_name,
 from .piano_roll import PianoRoll
 from .widgets import (DATA_ROLE, SORT_ROLE, ElidedLabel, PartRow, ScaleFilterBox, SelectionView, SortItem,
                       SummaryView, swatch_icon)
+from .update_ui import UpdateMixin
 from .window_extras import ExtrasMixin
 
 log = logging.getLogger(__name__)
@@ -194,7 +195,7 @@ class Auditioner:
             log.exception("Could not play the instrument preview")
 
 
-class MainWindow(ExtrasMixin, QMainWindow):
+class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -243,6 +244,7 @@ class MainWindow(ExtrasMixin, QMainWindow):
         if i18n.language() != "en":
             i18n.retranslate(self, i18n.language())
             self._retranslate_dynamic()
+        self._start_update_checks()
 
         self.audition = Auditioner(self)
         self._refresh_timer = QTimer(self)
@@ -469,6 +471,7 @@ class MainWindow(ExtrasMixin, QMainWindow):
         rl.addWidget(self.analyze_btn)
         rl.addWidget(self.cancel_btn)
         lay.addWidget(run)
+        self._build_update_section(lay)
 
         lay.addStretch(1)
 
@@ -2021,4 +2024,6 @@ class MainWindow(ExtrasMixin, QMainWindow):
         if self.result:
             remove_dir(self.result.work_dir)
         remove_dir(self._work_dir)
+        self._stop_update_job()
+        self._apply_pending_update()
         event.accept()

@@ -1,7 +1,5 @@
 # Audio Scribe
 
-https://github.com/user-attachments/assets/bb6e6690-f1bb-4221-bea3-9f0397f0036e
-
 Open any audio or video file and Audio Scribe will:
 
 - Write out the words with a timestamp for every word (speech or song lyrics)
@@ -25,7 +23,11 @@ New in 2.0:
 - **Slow down** without changing the pitch, a **click track**, **tap tempo**, and a beat grid you can fix by hand
 - **Cleanup tools** for stray notes, **record from your microphone**, **drag MIDI** straight into Reaper or any DAW, and **lyrics with chords** export
 
-It runs on your own computer. Your audio is never uploaded anywhere. It only goes online to download a model the first time you use it, and to download from YouTube when you ask it to.
+New in 2.0.1:
+
+- **Updates itself.** It checks GitHub for a newer version, asks you first, then downloads it, checks its signature, and restarts on the new version
+
+It runs on your own computer. Your audio is never uploaded anywhere. It only goes online to download a model the first time you use it, to download from YouTube when you ask it to, and to check for a new version (you can turn that off).
 
 Works on Linux and Windows.
 
@@ -54,9 +56,9 @@ The installer adds a launcher at `~/.local/bin/audio-scribe` and a menu entry wi
 3. Answer the questions about stem separation and YouTube download (see below)
 4. Start it from the Start menu (or the desktop shortcut if you added one)
 
-### Updating from an older version
+### Updating
 
-Extract the new zip over the old folder (or into a new folder) and run the installer again. Your settings are kept.
+From 2.0.1 on, Audio Scribe updates itself (see [Updates](#updates)). To update from 2.0 or older, extract the new zip over the old folder and run the installer again once. Your settings are kept.
 
 ### Installer options
 
@@ -70,6 +72,7 @@ Both installers take the same options. On Windows add them after `install.bat`, 
 | `--with-youtube` | `-WithYouTube` | Install YouTube download without asking |
 | `--no-youtube` | `-NoYouTube` | Skip YouTube download without asking |
 | `--update-youtube` | `-UpdateYouTube` | Get the newest yt-dlp and Deno, for when YouTube downloads stop working |
+| `--update` | `-Update` | What the in-app updater runs: no questions, and the optional parts stay the way they are |
 | `--yes` | `-Yes` | Take the default answer for every question |
 | `--uninstall` | `-Uninstall` | Remove the shortcuts and the `.venv` and `.tools` folders |
 
@@ -331,6 +334,20 @@ The Export button at the top right has:
 
 What you export matches what you see. Muted parts are left out, the scale filter applies, and any notes you edited are the edited ones.
 
+### Updates
+
+The **Updates** section at the bottom of the Analyze tab shows your version and has a **Check for updates** button. With **Check for updates when Audio Scribe opens** ticked (the default), it also looks by itself, at most once a day.
+
+When there's a newer version it tells you which one, with a short note about what changed, and asks first. Press **Update now** and it:
+
+1. Downloads the new version from GitHub and checks that it is signed by the Audio Scribe key and that every file matches the signed list. Anything that doesn't match is thrown away and nothing changes.
+2. Closes. If you have edits you haven't saved it asks first, and if you keep the app open nothing is installed.
+3. Puts the new files in place, keeping a backup of the old ones. If anything goes wrong halfway, the old files are put back.
+4. Runs the installer in update mode if the package lists changed, so new packages are installed (hash-checked, as always).
+5. Opens Audio Scribe again, which tells you it was updated.
+
+Your `.venv`, settings, models, and projects are never touched by an update. A copy that is a git checkout (has a `.git` folder) doesn't update itself, use `git pull` there instead.
+
 ## How accurate is it?
 
 **Words:** very good on clear speech. Songs are harder, since singing, effects, and loud music all get in the way. Stem separation plus picking the language plus a bigger model gives the best results.
@@ -354,16 +371,17 @@ Everything the installers download is pinned to an exact version and checked aga
 - **uv is pinned and hash-checked.** The installers don't pipe a script from the internet into a shell. They download uv 0.12.17 from its GitHub release and compare its SHA-256 with the hash written into the installer. If it doesn't match, they stop before running anything. If you already have uv installed (for example from your distro), that one is used instead.
 - **Every Python package is pinned and hash-checked.** `requirements.txt` lists every package, including the ones pulled in indirectly, with an exact version and its hashes. The installers use `--require-hashes`, so any file that doesn't match won't install. The optional YouTube packages (`requirements-youtube.txt`) and stem packages are pinned and hash-checked the same way.
 - **Nothing brand new.** The package lists only include releases from before Sept 21, 2026. Hijacked releases are usually caught within days, so a short wait avoids most of them.
-- **Only what's needed.** Sheet music added one package (Verovio). Translation uses CTranslate2 and the tokenizer library that Whisper already needs, so it added none. YouTube download is optional. Demucs is installed without `sphn` and `lameenc`, which Audio Scribe never calls.
+- **Only what's needed.** Sheet music added one package (Verovio), and signed updates added one (cryptography, for checking the signature). Translation uses CTranslate2 and the tokenizer library that Whisper already needs, so it added none. YouTube download is optional. Demucs is installed without `sphn` and `lameenc`, which Audio Scribe never calls.
 - **No code in model files.** Demucs is only loaded from its safetensors release, a format that can only hold data. Its fallback to older pickle files, which can run code when loaded, is turned off. Whisper and translation models are weight files plus text settings. Basic Pitch's model is an ONNX file that ships inside its package.
 - **The translation model is pinned and hash-checked.** It is downloaded from one exact revision on Hugging Face, and every file is compared with the hash written into the app before it is used. A file that doesn't match is deleted and not used.
+- **Updates are signed.** The app only installs a new version whose file list is signed by the maintainer's Ed25519 key (the public half is in `audioscribe/update_key.txt`, the private half never leaves the maintainer's computer), and only if every downloaded file matches the SHA-256 in that list. So even someone who took over the GitHub repo couldn't push an update to you without that key. It never goes back to an older version.
 - **sudo is only used for one optional system package** (xcb-cursor on Linux), and it asks first.
 
 **What the app itself does**
 
-- The only network traffic is downloading models from Hugging Face the first time you use them, and YouTube downloads when you start one. Your audio and results never leave your computer. The optional usage reporting in the Hugging Face and ONNX Runtime libraries is turned off.
+- The only network traffic is downloading models from Hugging Face the first time you use them, YouTube downloads when you start one, and the update check. The update check only fetches two small files from `raw.githubusercontent.com` (the signed list and its signature), and the code itself from `codeload.github.com` when you say yes. It sends nothing about you or your files, refuses any other address or redirect, and can be turned off. Your audio and results never leave your computer. The optional usage reporting in the Hugging Face and ONNX Runtime libraries is turned off.
 - YouTube links are checked before anything is fetched: only youtube.com, youtu.be, and music.youtube.com links are accepted, and the app always fetches the plain video address over https, one video at a time, no playlists, at most 4 hours and 2 GB. Files are saved under a safe file name in the folder you picked and never overwrite an existing file.
-- The only other program it ever starts is Deno, and only during a YouTube download. yt-dlp uses it to run YouTube's JavaScript check inside Deno's sandbox, with no access to your files, the network, or other programs, and with the checking code coming from the installed (hash-checked) yt-dlp-ejs package rather than from the internet.
+- Besides the update (which starts a small helper that waits for the app to close, copies the files, runs the installer in update mode if needed, and opens the app again), the only other program it ever starts is Deno, and only during a YouTube download. yt-dlp uses it to run YouTube's JavaScript check inside Deno's sandbox, with no access to your files, the network, or other programs, and with the checking code coming from the installed (hash-checked) yt-dlp-ejs package rather than from the internet.
 - Project files are checked before anything is read from them: only the expected files, with size limits, and every value checked. Nothing from a project is ever run, and file names inside it are never used as paths.
 - It only deletes its own temporary files in its cache folder.
 - File names and error messages are always shown as plain text.
@@ -375,6 +393,7 @@ Everything the installers download is pinned to an exact version and checked aga
 - `--update-youtube` gets the newest yt-dlp and Deno from PyPI over HTTPS without hash pins, because the pins are for one fixed version. That trade is there because an old yt-dlp eventually stops working with YouTube. It only updates yt-dlp, yt-dlp-ejs, and Deno.
 - On Linux, PyTorch comes from the official PyTorch index at a pinned version (2.14.0), but its hash isn't written into these files. The same goes for the optional NVIDIA builds on either system. The Windows CPU build is fully hash-checked.
 - Whisper and Demucs model files from Hugging Face aren't pinned to a specific revision. Whisper models come from the Systran account (the faster-whisper team), except Large turbo, which faster-whisper itself gets from the mobiuslabsgmbh account. Demucs comes from the adefossez account. The translation model is pinned, and is a conversion of Meta's NLLB-200 published by the JustFrederik account.
+- Updates trust the maintainer's signing key. Whoever has the private key can publish an update the app accepts, so it is kept off GitHub and protected with a passphrase.
 - Opening a media file runs it through FFmpeg, the same as any media player, so a file made to attack an FFmpeg bug is a risk with any player. Only open files from sources you trust, and update the pins now and then.
 
 To move to newer versions later, regenerate the lists from the `.in` files with `uv pip compile --universal --python-version 3.12 --generate-hashes` (for the YouTube list, add `-c requirements.txt`).
@@ -388,6 +407,7 @@ To move to newer versions later, regenerate the lists from the `.in` files with 
 | Recordings and YouTube downloads | `~/Music/Audio Scribe` (you can change it) | `Music\Audio Scribe` |
 | Temporary audio while open | `~/.cache/audio-scribe/work` | `%LOCALAPPDATA%\audio-scribe\work` |
 | Log file | `~/.cache/audio-scribe/audio-scribe.log` | `%LOCALAPPDATA%\audio-scribe\audio-scribe.log` |
+| Update downloads, backups, and log | `~/.cache/audio-scribe/update` | `%LOCALAPPDATA%\audio-scribe\update` |
 | Settings | `~/.config/AudioScribe` | Registry, `HKCU\Software\AudioScribe` |
 
 Temporary audio (including the sounds built for playback) is deleted when you close the app or analyze another file. Your instrument, language, and note name choices are saved in the settings.
@@ -423,6 +443,8 @@ It lists every part and says what is missing.
 **The microphone isn't found.** Plug it in before opening the Record window. On Linux, check that it works in your sound settings first. On Windows, check that Settings > Privacy (& security) > Microphone lets desktop apps use it.
 
 **It's slow.** Use a smaller Whisper model, turn off stem splitting, or try a shorter clip first. On the CPU, a 4 minute song with the Small model and no stems usually takes a minute or two. Stem splitting adds a few minutes. Translation of a whole song takes a few seconds once the model is downloaded.
+
+**An update says the code on GitHub doesn't match its signed list.** The newest code was pushed without being signed again. Nothing was installed. Try again later.
 
 **Something else went wrong.** The error box has a Details button with the full error, and the log file (see the table above) has more.
 
@@ -463,9 +485,44 @@ audio-scribe/
     youtube.py               YouTube download
     translate.py             lyrics translation
     i18n.py, i18n_ro.py      the interface languages and the Romanian text
+    updater.py               checking for, downloading, and verifying updates
+    update_helper.py         puts an update in place after the app closes
+    update_ui.py             the Updates section and the update prompt
+    update_key.txt           the public key updates must be signed with
     icon.py                  the app icon
+  tools/
+    release.py               signs new versions (for the maintainer)
+  update/
+    manifest.json, .sig      the signed file list of the current version
 ```
 
 Built with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for the words, [Basic Pitch](https://github.com/spotify/basic-pitch) for the notes, [Demucs](https://pypi.org/project/demucs/) for stems, [librosa](https://librosa.org) for tempo and chords, [Verovio](https://www.verovio.org) for sheet music, [NLLB-200](https://huggingface.co/facebook/nllb-200-distilled-600M) with [CTranslate2](https://github.com/OpenNMT/CTranslate2) for translation, [yt-dlp](https://github.com/yt-dlp/yt-dlp) for YouTube, and [PySide6](https://doc.qt.io/qtforpython-6/) for the interface.
 
 You can run it without the installer too: create a Python 3.12 environment, then `pip install --require-hashes -r requirements.txt`, `pip install --require-hashes --no-deps -r requirements-nodeps.txt`, optionally `pip install --require-hashes -r requirements-youtube.txt`, and from this folder run `python -m audioscribe`.
+
+## Publishing an update (for the maintainer)
+
+The app updates from the `main` branch of [github.com/Snowblind019/Audio-Scribe](https://github.com/Snowblind019/Audio-Scribe), but only when the version there is newer and signed. Use the app's own Python for these commands (`.venv/bin/python`, or `.venv\Scripts\python.exe` on Windows).
+
+**Once:** make your signing key.
+
+```bash
+.venv/bin/python tools/release.py keygen
+```
+
+It asks for a passphrase (use one), saves the private key to `~/.config/audio-scribe-release/signing-key.pem`, and writes the public key into `audioscribe/update_key.txt`. Commit that file. Back up the private key somewhere safe and never commit it: without it you can't publish updates the app will accept, and anyone who has it can.
+
+**Each new version:**
+
+1. Raise `__version__` in `audioscribe/__init__.py` (for example `2.0.1` to `2.0.2`). The app only offers versions newer than its own.
+2. Stage everything and sign it:
+
+   ```bash
+   git add -A
+   .venv/bin/python tools/release.py sign --notes "What changed, in a sentence or two"
+   git add update
+   git commit -m "Audio Scribe 2.0.2"
+   git push
+   ```
+
+`sign` lists every staged file with its SHA-256, signs the list, and writes `update/manifest.json` and `update/manifest.sig`. The note is shown in the update prompt. If you push more changes later without signing again, the app sees the files don't match the signed list and waits, so nothing half-done reaches anyone. `tools/release.py verify` checks that `update/` matches what is staged.

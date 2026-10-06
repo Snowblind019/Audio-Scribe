@@ -11,3 +11,5 @@ resampy==0.4.3
 mir_eval==0.8.2
 pretty_midi==0.2.11.post0
 verovio==6.3.0
+# Checking the signature on app updates (Ed25519).
+cryptography==50.0.1

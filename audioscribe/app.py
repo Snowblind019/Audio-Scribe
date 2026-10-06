@@ -209,6 +209,14 @@ def run_check() -> int:
 
     report("Lyrics translation", translation)
 
+    def update_checks() -> str:
+        import cryptography
+        from . import updater
+        state = "ready" if updater.public_key() else "not set up yet (no signing key)"
+        return f"{state} (cryptography {cryptography.__version__})"
+
+    report("Update checks", update_checks)
+
     from . import youtube
     if youtube.available():
         def youtube_check() -> str:
