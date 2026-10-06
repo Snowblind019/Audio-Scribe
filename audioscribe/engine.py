@@ -6,7 +6,8 @@ Steps, in order:
   3. Optionally split the song into stems (Demucs).
   4. Transcribe the words with timestamps (faster-whisper).
   5. Find the notes in the full mix or in each chosen stem (Basic Pitch).
-  6. Estimate the key from the notes.
+  6. Find the chords in the sound (librosa chroma).
+  7. Estimate the key from the notes.
 
 Everything here runs on a worker thread. Progress is reported through a
 callback and the work can be stopped between chunks.
@@ -25,7 +26,8 @@ from typing import Callable
 
 import numpy as np
 
-from . import audio, drums
+from . import audio, audiochords, drums
+from .i18n import tr
 from .music import KeyEstimate, estimate_key, format_time, pitch_class_weights
 from .synth import default_instrument_for
 
@@ -122,6 +124,7 @@ class Options:
     min_note_ms: int = 120
     separate: bool = False
     note_stems: list[str] = field(default_factory=lambda: ["Vocals", "Bass", "Other", "Drums"])
+    chords: bool = True    # find the chords in the sound
     device: str = "cpu"  # "cpu" or "cuda"
 
 
@@ -142,6 +145,16 @@ class Result:
     words_requested: bool
     translated: bool = False
     elapsed: float = 0.0
+    chords: list = field(default_factory=list)       # (start, end, Chord or None) heard in the recording
+    meter: int = 4                                   # beats per bar
+    detected_tempo: float | None = None              # what the analysis found, so the grid can be reset
+    detected_beats: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.detected_tempo is None:
+            self.detected_tempo = self.tempo
+        if not self.detected_beats:
+            self.detected_beats = list(self.beats)
 
 
 class Cancelled(Exception):
@@ -278,10 +291,12 @@ class Analyzer:
         if o.transcribe:
             steps.append(("transcribe", float(_WHISPER_WEIGHT.get(o.model, 6))))
         steps += [(f"notes:{name}", 3.0) for name in targets]
+        if o.chords:
+            steps.append(("chords", 1.0))
         progress = _Progress(steps, self.report)
 
         # 1. Decode
-        progress.start("read", "Reading the audio")
+        progress.start("read", tr("Reading the audio"))
         stereo = audio.decode(self.path, SAMPLE_RATE, 2)
         duration = stereo.shape[1] / SAMPLE_RATE
         if duration < 0.2:
@@ -292,13 +307,13 @@ class Analyzer:
         self._check()
 
         # 2. Tempo and beats
-        progress.start("tempo", "Finding the tempo")
+        progress.start("tempo", tr("Finding the tempo"))
         tempo, beats = self._tempo(original)
         self._check()
 
         # 3. Stems
         if o.separate:
-            progress.start("separate", "Splitting into stems (first run downloads the model)")
+            progress.start("separate", tr("Splitting into stems (first run downloads the model)"))
             files.update(self._separate(stereo, progress))
         del stereo
         self._check()
@@ -308,7 +323,7 @@ class Analyzer:
         language, language_prob = None, 0.0
         if o.transcribe:
             source = files.get("Vocals", files["Original"])
-            progress.start("transcribe", "Loading Whisper (first run downloads the model)")
+            progress.start("transcribe", tr("Loading Whisper (first run downloads the model)"))
             segments, language, language_prob = self._transcribe(source, progress)
 
         # 5. Notes
@@ -318,8 +333,9 @@ class Analyzer:
             path = files["Original"] if name == "Full mix" else files.get(name)
             if not path:
                 continue
-            label = "the full mix" if name == "Full mix" else name.lower()
-            progress.start(f"notes:{name}", f"Finding notes in {label}")
+            text = tr("Finding notes in the full mix") if name == "Full mix" else \
+                tr("Finding notes in the part: {part}").format(part=tr(name))
+            progress.start(f"notes:{name}", text)
             notes = self._notes(path, name)
             tracks.append(Track(name, TRACK_COLORS.get(name, "#69A7E0"), notes,
                                 instrument=default_instrument_for(name), audio=path))
@@ -333,20 +349,46 @@ class Analyzer:
                                     instrument=default_instrument_for(name), audio=files[name]))
         tracks.sort(key=lambda t: (STEM_ORDER.index(t.name) if t.name in STEM_ORDER else -1))
 
-        # 6. Key
+        # 6. Chords
+        chords = []
+        if o.chords:
+            self._check()
+            progress.start("chords", tr("Finding the chords"))
+            chords = self._chords(files, beats, duration)
+
+        # 7. Key
         pitched = [n for t in tracks if t.name != "Drums" for n in t.notes]
         key = estimate_key(pitch_class_weights(pitched)) if pitched else None
 
-        self.report(1.0, "Done")
+        self.report(1.0, tr("Done"))
         return Result(
             source=str(self.path), duration=duration, work_dir=str(self.work_dir),
             audio_files=files, segments=segments, language=language,
             language_probability=language_prob, tracks=tracks, tempo=tempo, beats=beats,
             key=key, notes_requested=o.notes, words_requested=o.transcribe,
             translated=o.transcribe and o.translate, elapsed=time.monotonic() - began,
+            chords=chords,
         )
 
     # Individual steps ------------------------------------------------------
+
+    def _chords(self, files: dict[str, str], beats: list[float], duration: float) -> list:
+        """Chords heard in the recording. With stems, the drums are left out first."""
+        try:
+            parts = [files[n] for n in ("Vocals", "Bass", "Other") if n in files]
+            if parts:
+                arrays = [audio.decode(p, audiochords.SR, 1)[0] for p in parts]
+                mono = np.zeros(max(len(a) for a in arrays), dtype=np.float32)
+                for a in arrays:
+                    mono[:len(a)] += a
+            else:
+                mono = audio.decode(files["Original"], audiochords.SR, 1)[0]
+            return audiochords.detect(mono, audiochords.SR, beats, duration)
+        except Cancelled:
+            raise
+        except Exception as exc:  # chords are a nice extra, never a reason to fail
+            log.warning("Chord detection failed: %s", exc)
+            return []
 
     def _tempo(self, wav: Path) -> tuple[float | None, list[float]]:
         try:
@@ -370,7 +412,7 @@ class Analyzer:
         self._check()
         use_cuda = self.options.device == "cuda" and torch.cuda.is_available()
         device = "cuda" if use_cuda else "cpu"
-        progress.update(0.0, f"Splitting into stems on the {'GPU' if use_cuda else 'CPU'}")
+        progress.update(0.0, tr("Splitting into stems on the GPU") if use_cuda else tr("Splitting into stems on the CPU"))
 
         wav = torch.from_numpy(np.ascontiguousarray(stereo))
         ref = wav.mean(0)
@@ -408,7 +450,7 @@ class Analyzer:
         def attempt(device: str):
             model = _load_whisper(o.model, device)
             self._check()
-            progress.update(0.02, "Transcribing words")
+            progress.update(0.02, tr("Transcribing words"))
             seg_iter, info = model.transcribe(
                 samples, language=o.language or None,
                 task="translate" if o.translate else "transcribe",
@@ -422,7 +464,8 @@ class Analyzer:
                          for w in (seg.words or []) if w.word.strip()]
                 found.append(Segment(float(seg.start), float(seg.end), seg.text.strip(), words))
                 progress.update(seg.end / max(total, 1e-6),
-                                f"Transcribing words ({format_time(seg.end, 0)} of {format_time(total, 0)})")
+                                tr("Transcribing words ({done} of {total})").format(
+                                    done=format_time(seg.end, 0), total=format_time(total, 0)))
             return found, info.language, float(info.language_probability or 0.0)
 
         if o.device == "cuda":
@@ -432,7 +475,7 @@ class Analyzer:
                 raise
             except Exception as exc:
                 log.warning("GPU transcription failed, falling back to CPU: %s", exc)
-                progress.update(0.0, "GPU not usable for Whisper, using the CPU instead")
+                progress.update(0.0, tr("GPU not usable for Whisper, using the CPU instead"))
         return attempt("cpu")
 
     def _drum_hits(self, wav: str) -> list[Note]:

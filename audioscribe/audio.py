@@ -13,10 +13,11 @@ from pathlib import Path
 import numpy as np
 
 
-def decode(path: str | Path, rate: int, channels: int) -> np.ndarray:
+def decode(path: str | Path, rate: int, channels: int, max_seconds: float | None = None) -> np.ndarray:
     """Decode the first audio track of a file.
 
-    Returns float32 samples shaped (channels, samples) at the given rate.
+    Returns float32 samples shaped (channels, samples) at the given rate. With max_seconds,
+    decoding stops there, so a file can't decode into more audio than expected.
     """
     import av
 
@@ -28,11 +29,16 @@ def decode(path: str | Path, rate: int, channels: int) -> np.ndarray:
             raise ValueError("This file has no audio track.")
         stream = container.streams.audio[0]
         resampler = av.AudioResampler(format="fltp", layout=layout, rate=rate)
+        limit = None if max_seconds is None else int(max_seconds * rate)
+        total = 0
         try:
             for frame in container.decode(stream):
                 frame.pts = None
                 for out in resampler.resample(frame):
                     chunks.append(out.to_ndarray())
+                    total += chunks[-1].shape[1]
+                if limit is not None and total >= limit:
+                    break
         except av.error.InvalidDataError:
             # Damaged data near the end of a file is common; keep what was read.
             pass
@@ -41,7 +47,10 @@ def decode(path: str | Path, rate: int, channels: int) -> np.ndarray:
 
     if not chunks:
         raise ValueError("Could not read any audio from this file.")
-    return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+    data = np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+    if limit is not None and data.shape[1] > limit:
+        data = data[:, :limit]
+    return data
 
 
 def write_wav(path: str | Path, data: np.ndarray, rate: int) -> None:

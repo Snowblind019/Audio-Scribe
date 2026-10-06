@@ -22,19 +22,22 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QSlider, QSpinBox, QSplitter, QStyle, QTabWidget, QToolButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import APP_NAME, exporters, mixer, synth
+from . import APP_NAME, exporters, i18n, mixer, project, synth
 from .app import cache_dir
 from .engine import (LANGUAGE_NAMES, LANGUAGES, STEM_ORDER, WHISPER_MODELS, Analyzer, Cancelled, Note,
                      Options, Result, cuda_available, friendly_error, remove_dir, stems_available)
-from .music import NoteFilter, estimate_key, format_time, note_label, note_name, pitch_class_weights
+from .i18n import tr, tr_n
+from .music import NoteFilter, estimate_key, format_time, note_label, note_name, pitch_class_weights, set_naming
 from .piano_roll import PianoRoll
 from .widgets import (DATA_ROLE, SORT_ROLE, ElidedLabel, PartRow, ScaleFilterBox, SelectionView, SortItem,
                       SummaryView, swatch_icon)
+from .window_extras import ExtrasMixin
 
 log = logging.getLogger(__name__)
 
-OPEN_FILTER = ("Audio and video (*.mp3 *.wav *.flac *.ogg *.oga *.opus *.m4a *.aac *.wma *.aif "
-               "*.aiff *.alac *.mp4 *.m4v *.mkv *.webm *.mov *.avi);;All files (*)")
+OPEN_FILTER = ("Audio, video and projects (*.mp3 *.wav *.flac *.ogg *.oga *.opus *.m4a *.aac *.wma *.aif "
+               "*.aiff *.alac *.mp4 *.m4v *.mkv *.webm *.mov *.avi *.ascribe);;Audio Scribe projects (*.ascribe);;"
+               "All files (*)")
 SNAP_CHOICES = [("Snap: off", 0), ("Snap: beat", 1), ("Snap: 1/2 beat", 2), ("Snap: 1/4 beat", 4)]
 UNDO_LIMIT = 60
 
@@ -166,6 +169,18 @@ class Auditioner:
         except Exception:
             log.exception("Could not play a note")
 
+    def rows(self, key: str, rows) -> None:
+        """Play any list of (start, end, pitch, strength), for example chords from the Chords tab."""
+        try:
+            folder = self._folder() or (cache_dir() / "audition")
+            folder.mkdir(parents=True, exist_ok=True)
+            self.window._audition_n += 1
+            path = folder / f"chords-{self.window._audition_n % 4}.wav"
+            mixer.write_stereo(path, synth.render_preview(key, list(rows), bank=self.bank))
+            self._play(path)
+        except Exception:
+            log.exception("Could not play the chords")
+
     def phrase(self, key: str) -> None:
         try:
             folder = self._folder()
@@ -179,13 +194,16 @@ class Auditioner:
             log.exception("Could not play the instrument preview")
 
 
-class MainWindow(QMainWindow):
+class MainWindow(ExtrasMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setAcceptDrops(True)
         self.resize(1360, 860)
         self.settings = QSettings()
+        i18n.set_language(str(self.settings.value("ui/language", "en")))
+        set_naming(style=str(self.settings.value("ui/note_names", "letters")))
+        self._init_extras_state()
 
         self.source_path: Path | None = None
         self.result: Result | None = None
@@ -216,11 +234,15 @@ class MainWindow(QMainWindow):
         self._saved_count = 0    # the value of _edit_count when the notes were last exported
 
         self._build_ui()
+        self._wire_roll_extras()
         self._build_player()
         self._build_shortcuts()
         self._load_settings()
         self._update_controls()
         _clean_old_work_dirs()
+        if i18n.language() != "en":
+            i18n.retranslate(self, i18n.language())
+            self._retranslate_dynamic()
 
         self.audition = Auditioner(self)
         self._refresh_timer = QTimer(self)
@@ -269,7 +291,8 @@ class MainWindow(QMainWindow):
         outer.addWidget(right, 1)
         self.setCentralWidget(root)
 
-        self.status_text = QLabel("Ready")
+        self.status_text = QLabel(tr("Ready"))
+        self.status_text.setProperty("i18n_skip", True)
 
         self.status_text.setTextFormat(Qt.PlainText)
         self.progress = QProgressBar()
@@ -323,6 +346,7 @@ class MainWindow(QMainWindow):
         # File
         box, l = self._section("File")
         self.file_label = QLabel("No file open yet.")
+        self.file_label.setProperty("i18n_skip", True)
         self.file_label.setTextFormat(Qt.PlainText)
         self.file_label.setObjectName("Hint")
         self.file_label.setWordWrap(True)
@@ -333,6 +357,7 @@ class MainWindow(QMainWindow):
         drop.setWordWrap(True)
         l.addWidget(self.file_label)
         l.addWidget(self.open_btn)
+        self._build_file_extras(l)
         l.addWidget(drop)
         lay.addWidget(box)
 
@@ -389,6 +414,9 @@ class MainWindow(QMainWindow):
         form.addRow("Sensitivity", sens_row)
         form.addRow("Shortest note", self.min_len)
         l.addLayout(form)
+        self.chk_chords = QCheckBox("Find chords")
+        self.chk_chords.setToolTip("Names the chords in the recording. They show above the piano roll and in the Chords tab.")
+        l.addWidget(self.chk_chords)
         lay.addWidget(box)
 
         # Stems
@@ -472,6 +500,8 @@ class MainWindow(QMainWindow):
         self.filter_box.hide()
         play_lay.addWidget(self.filter_box)
 
+        self._build_grid_section(play_lay)
+
         self.sound_box, l = self._section(
             "Sound", "Choose what plays in the bar at the bottom: the recording, "
                      "the notes on instruments, or both.")
@@ -486,6 +516,7 @@ class MainWindow(QMainWindow):
         self.room_chk.setToolTip("A little reverb on the instruments, so they don't sound dry and flat.")
         self.room_chk.toggled.connect(lambda _on: self._queue_sound())
         l.addWidget(self.room_chk)
+        self._build_click_controls(l, form)
         self.sound_box.hide()
         play_lay.addWidget(self.sound_box)
         play_lay.addStretch(1)
@@ -522,12 +553,14 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel(APP_NAME)
         self.title_label.setTextFormat(Qt.PlainText)
         self.title_label.setObjectName("FileTitle")
+        self.title_label.setProperty("i18n_skip", True)
         self.meta_label = QLabel("Open a song, a voice memo, or a video to see its words and notes.")
         self.meta_label.setTextFormat(Qt.PlainText)
         self.meta_label.setObjectName("Meta")
         text.addWidget(self.title_label)
         text.addWidget(self.meta_label)
         l.addLayout(text, 1)
+        self._build_header_extras(l)
 
         self.export_btn = QToolButton()
         self.export_btn.setText("Export")
@@ -537,16 +570,27 @@ class MainWindow(QMainWindow):
         self.act_txt = menu.addAction("Transcript as text (.txt)", lambda: self._export_text("txt"))
         self.act_srt = menu.addAction("Transcript as subtitles (.srt)", lambda: self._export_text("srt"))
         self.act_lrc = menu.addAction("Lyrics with timing (.lrc)", lambda: self._export_text("lrc"))
+        self.act_chord_txt = menu.addAction("Lyrics with chords (.txt)", lambda: self._export_chords("txt"))
+        self.act_chordpro = menu.addAction("Lyrics with chords, ChordPro (.cho)", lambda: self._export_chords("cho"))
         menu.addSeparator()
         self.act_mid = menu.addAction("Notes as MIDI (.mid)", self._export_midi)
         self.act_csv = menu.addAction("Notes as spreadsheet (.csv)", self._export_csv)
+        self.act_sheet = menu.addAction("Sheet music (PDF, print, MusicXML)...", self._open_sheet)
         menu.addSeparator()
         self.act_stems = menu.addAction("Stems as WAV files...", self._export_stems)
         menu.addAction("Recording or notes as WAV (what you hear)...", self._export_sound)
         self.act_sound = menu.actions()[-1]
+        menu.addSeparator()
+        self.act_save_project = menu.addAction("Project (everything, to open again later)...", self._save_project)
         self.export_btn.setMenu(menu)
+        self._fit_export_button()
         l.addWidget(self.export_btn)
         return header
+
+    def _fit_export_button(self) -> None:
+        """Leaves room for the little menu arrow next to the text."""
+        text_w = self.export_btn.fontMetrics().horizontalAdvance(self.export_btn.text())
+        self.export_btn.setMinimumWidth(text_w + 44)
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -591,7 +635,13 @@ class MainWindow(QMainWindow):
         self.revert_btn.setText("Revert all")
         self.revert_btn.setToolTip("Put every note back the way it was found")
         self.revert_btn.clicked.connect(self._revert_all)
-        for w in (add_label, self.add_to_box, self.strength_spin, self.undo_btn, self.redo_btn, self.revert_btn):
+        self.cleanup_btn = QToolButton()
+        self.cleanup_btn.setText("Clean up...")
+        self.cleanup_btn.setToolTip("Remove stray notes, join broken ones, line notes up with the beat")
+        self.cleanup_btn.clicked.connect(self._open_cleanup)
+        self.add_to_box.setProperty("i18n_skip_items", True)
+        for w in (add_label, self.add_to_box, self.strength_spin, self.undo_btn, self.redo_btn, self.revert_btn,
+                  self.cleanup_btn):
             el.addWidget(w)
         self.edit_box.hide()
         l.addWidget(self.edit_box)
@@ -605,6 +655,7 @@ class MainWindow(QMainWindow):
         l.addStretch(1)
 
         self.span_label = ElidedLabel("Drag across the piano roll to select a span")
+        self.span_label.setProperty("i18n_skip", True)
         self.span_label.setObjectName("Meta")
         self.span_label.setTextFormat(Qt.PlainText)
         self.zoom_btn = QToolButton()
@@ -639,13 +690,16 @@ class MainWindow(QMainWindow):
         self.lang_label = QLabel("Click a line to jump to it.")
         self.lang_label.setTextFormat(Qt.PlainText)
         self.lang_label.setObjectName("Meta")
+        self.lang_label.setProperty("i18n_skip", True)
         self.copy_btn = QPushButton("Copy text")
         self.copy_btn.clicked.connect(self._copy_transcript)
         bar.addWidget(self.lang_label, 1)
         bar.addWidget(self.copy_btn)
+        self._build_transcript_extras(bar)
         pl.addLayout(bar)
         self.transcript = QTreeWidget()
-        self.transcript.setHeaderLabels(["Time", "Words"])
+        self.transcript.setHeaderLabels(["Time", "Words", "Translation"])
+        self.transcript.setColumnHidden(2, True)
         self.transcript.setRootIsDecorated(False)
         self.transcript.setUniformRowHeights(False)
         self.transcript.setWordWrap(True)
@@ -662,6 +716,7 @@ class MainWindow(QMainWindow):
         nbar = QHBoxLayout()
         nbar.setContentsMargins(14, 6, 10, 6)
         self.notes_label = QLabel("")
+        self.notes_label.setProperty("i18n_skip", True)
         self.notes_label.setTextFormat(Qt.PlainText)
         self.notes_label.setObjectName("Meta")
         self.span_only_chk = QCheckBox("Only the selected span")
@@ -672,7 +727,7 @@ class MainWindow(QMainWindow):
         nbar.addWidget(self.span_only_chk)
         nl.addLayout(nbar)
         self.notes_table = QTreeWidget()
-        self.notes_table.setHeaderLabels(["Note", "Track", "Start", "Length", "Strength"])
+        self.notes_table.setHeaderLabels(["Note", "Part", "Start", "Length", "Strength"])
         self.notes_table.setRootIsDecorated(False)
         self.notes_table.setAlternatingRowColors(True)
         self.notes_table.setUniformRowHeights(True)
@@ -689,6 +744,7 @@ class MainWindow(QMainWindow):
         self.selection.pitchSelected.connect(self._on_summary_pitch)
         self.selection.seekRequested.connect(self.seek)
         tabs.addTab(self.selection, "Selection")
+        self._build_chords_tab(tabs)
         self.tabs = tabs
         return tabs
 
@@ -715,6 +771,7 @@ class MainWindow(QMainWindow):
             l.addWidget(b)
 
         self.clock = QLabel("0:00.0 / 0:00.0")
+        self.clock.setProperty("i18n_skip", True)
         mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         mono.setPointSizeF(max(9.0, self.font().pointSizeF() + 0.5))
         self.clock.setFont(mono)
@@ -740,6 +797,8 @@ class MainWindow(QMainWindow):
         self.mode_box.currentIndexChanged.connect(lambda _i: self._on_mode_changed())
         l.addWidget(self.source_label)
         l.addWidget(self.mode_box)
+        l.addSpacing(6)
+        self._build_speed_controls(l)
 
         vol_icon = QLabel()
         vol_icon.setPixmap(st.standardIcon(QStyle.SP_MediaVolume).pixmap(16, 16))
@@ -811,6 +870,8 @@ class MainWindow(QMainWindow):
         add("Z", letter(self._toggle_zoom_span))
         add("Ctrl+Z", self.undo)
         add(["Ctrl+Y", "Ctrl+Shift+Z"], self.redo)
+        add(QKeySequence.Save, self._save_project)
+        add("T", letter(lambda: self.result and self._tap()))
 
     # Settings -------------------------------------------------------------------
 
@@ -829,6 +890,13 @@ class MainWindow(QMainWindow):
         self.chk_notes.setChecked(get_bool("notes/enabled", True))
         self.sens.setValue(int(s.value("notes/sensitivity", 50)))
         self.min_len.setValue(int(s.value("notes/min_ms", 120)))
+        self.chk_chords.setChecked(get_bool("notes/chords", True))
+        self.click_chk.setChecked(get_bool("sound/click", False))
+        self.click_level.setValue(int(s.value("sound/click_level", 60)))
+        self._set_combo(self.names_box, str(s.value("ui/note_names", "letters")))
+        self.lang_combo.blockSignals(True)
+        self._set_combo(self.lang_combo, i18n.language())
+        self.lang_combo.blockSignals(False)
         self.chk_stems.setChecked(get_bool("stems/enabled", False) and self._stems_ok)
         chosen = s.value("stems/note_stems", "Vocals,Bass,Other,Drums")
         chosen = chosen if isinstance(chosen, str) else ",".join(chosen)
@@ -861,6 +929,9 @@ class MainWindow(QMainWindow):
         s.setValue("notes/enabled", self.chk_notes.isChecked())
         s.setValue("notes/sensitivity", self.sens.value())
         s.setValue("notes/min_ms", self.min_len.value())
+        s.setValue("notes/chords", self.chk_chords.isChecked())
+        s.setValue("sound/click", self.click_chk.isChecked())
+        s.setValue("sound/click_level", self.click_level.value())
         s.setValue("stems/enabled", self.chk_stems.isChecked())
         s.setValue("stems/note_stems", ",".join(n for n, c in self.stem_checks.items() if c.isChecked()))
         s.setValue("device", self.device_box.currentData())
@@ -900,6 +971,7 @@ class MainWindow(QMainWindow):
         notes = self.chk_notes.isChecked() and not busy
         self.sens.setEnabled(notes)
         self.min_len.setEnabled(notes)
+        self.chk_chords.setEnabled(not busy)
         self.chk_stems.setEnabled(self._stems_ok and not busy)
         stems = self.chk_stems.isChecked() and self._stems_ok and not busy
         self.stems_label.setEnabled(stems and notes)
@@ -936,6 +1008,7 @@ class MainWindow(QMainWindow):
             box.setVisible(has_tracks)
         self.play_empty.setVisible(not has_tracks)
         self._update_undo_buttons()
+        self._extras_update_controls()
 
     # Opening files --------------------------------------------------------------
 
@@ -943,7 +1016,7 @@ class MainWindow(QMainWindow):
         if self._busy():
             return
         start = self.settings.value("last_dir", str(Path.home()))
-        path, _ = QFileDialog.getOpenFileName(self, "Open audio or video", start, OPEN_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, tr("Open audio, video or a project"), start, tr(OPEN_FILTER))
         if path:
             self.open_file(path)
 
@@ -952,7 +1025,10 @@ class MainWindow(QMainWindow):
             return
         path = Path(path)
         if not path.is_file():
-            show_message(self, QMessageBox.Warning, f"Could not find {path}.")
+            show_message(self, QMessageBox.Warning, tr("Could not find {path}.").format(path=path))
+            return
+        if path.suffix.lower() == project.SUFFIX:
+            self._open_project(path)
             return
         if not self._confirm_discard_edits():
             return
@@ -960,11 +1036,11 @@ class MainWindow(QMainWindow):
         self.source_path = path
         self._clear_results()
         self.title_label.setText(path.name)
-        self.meta_label.setText("Press Analyze to find the words and notes.")
+        self.meta_label.setText(tr("Press Analyze to find the words and notes."))
         self.file_label.setText(path.name)
         self.setWindowTitle(f"{path.name} - {APP_NAME}")
-        self.roll.clear("Press Analyze to find the words and notes.")
-        self.status_text.setText("File opened. You can play it now or press Analyze.")
+        self.roll.clear(tr("Press Analyze to find the words and notes."))
+        self.status_text.setText(tr("File opened. You can play it now or press Analyze."))
         self._set_source(str(path), keep_position=False)
         self._update_controls()
 
@@ -989,8 +1065,9 @@ class MainWindow(QMainWindow):
         self.summary.clear()
         self.selection.show_none()
         self._seg_starts, self._current_seg = [], -1
-        self.lang_label.setText("Click a line to jump to it.")
+        self.lang_label.setText(tr("Click a line to jump to it."))
         self._fill_parts([])
+        self._extras_clear()
         self.inspector_tabs.setCurrentIndex(0)
         self.note_filter = NoteFilter()
         self.scale_filter.reset()
@@ -1014,6 +1091,7 @@ class MainWindow(QMainWindow):
             min_note_ms=self.min_len.value(),
             separate=self.chk_stems.isChecked() and self._stems_ok,
             note_stems=[n for n, c in self.stem_checks.items() if c.isChecked()],
+            chords=self.chk_chords.isChecked(),
             device=self.device_box.currentData(),
         )
 
@@ -1024,13 +1102,17 @@ class MainWindow(QMainWindow):
             self._open_dialog()
             return
         o = self._options()
-        if not o.transcribe and not o.notes:
-            show_message(self, QMessageBox.Information, "Turn on Transcribe words or Find notes first.")
+        if not o.transcribe and not o.notes and not o.chords:
+            show_message(self, QMessageBox.Information, tr("Turn on Transcribe words, Find notes or Find chords first."))
             return
         if o.notes and o.separate and not o.note_stems:
-            show_message(self, QMessageBox.Information, "Pick at least one stem to find notes in.")
+            show_message(self, QMessageBox.Information, tr("Pick at least one stem to find notes in."))
             return
-        if not self._confirm_discard_edits("Analyzing again replaces the notes you edited."):
+        if self.source_path is not None and self.source_path.suffix.lower() == project.SUFFIX:
+            show_message(self, QMessageBox.Information, tr("This is a project, so it is already analyzed. "
+                                                           "To analyze again, open the original audio file."))
+            return
+        if not self._confirm_discard_edits(tr("Analyzing again replaces the notes you edited.")):
             return
         self._save_settings()
         self._work_dir = Path(tempfile.mkdtemp(prefix="run-", dir=_work_root()))
@@ -1042,7 +1124,7 @@ class MainWindow(QMainWindow):
         self.thread.finished.connect(self._on_thread_finished)
         self.progress.setValue(0)
         self.progress.show()
-        self.status_text.setText("Starting")
+        self.status_text.setText(tr("Starting"))
         self.thread.start()
         self._update_controls()
 
@@ -1050,30 +1132,30 @@ class MainWindow(QMainWindow):
         if self.thread:
             self.thread.stop()
             self.cancel_btn.setEnabled(False)
-            self.status_text.setText("Stopping after the current step")
+            self.status_text.setText(tr("Stopping after the current step"))
 
     def _on_progress(self, fraction: float, text: str) -> None:
         self.progress.setValue(int(fraction * 1000))
-        self.status_text.setText(text)
+        self.status_text.setText(tr(text))
 
     def _on_success(self, result: Result) -> None:
         self._work_dir = None
         self._show_result(result)
         secs = int(round(result.elapsed))
         took = f"{secs // 60} min {secs % 60} s" if secs >= 60 else f"{secs} s"
-        self.status_text.setText(f"Done in {took}.")
+        self.status_text.setText(tr("Done in {time}.").format(time=took))
 
     def _on_failed(self, message: str, details: str) -> None:
         remove_dir(self._work_dir)
         self._work_dir = None
-        self.status_text.setText("Analysis failed.")
-        show_message(self, QMessageBox.Critical, message, details=details,
-                     informative="Your file was not changed. Full details are below.")
+        self.status_text.setText(tr("Analysis failed."))
+        show_message(self, QMessageBox.Critical, tr(message), details=details,
+                     informative=tr("Your file was not changed. Full details are below."))
 
     def _on_cancelled(self) -> None:
         remove_dir(self._work_dir)
         self._work_dir = None
-        self.status_text.setText("Analysis cancelled.")
+        self.status_text.setText(tr("Analysis cancelled."))
 
     def _on_thread_finished(self) -> None:
         if self.thread:
@@ -1094,11 +1176,12 @@ class MainWindow(QMainWindow):
                 t.instrument = saved
         self._apply_visibility(refresh=False)
         self.roll.set_data(r.duration, r.tracks, r.segments, r.beats)
+        self.roll.set_beats(r.beats, r.meter)
         self.roll.set_filter(self.note_filter)
-        if not r.tracks and not r.segments:
-            self.roll.set_message("Nothing was found in this file.")
+        if not r.tracks and not r.segments and not r.chords:
+            self.roll.set_message(tr("Nothing was found in this file."))
         elif not any(t.notes for t in r.tracks):
-            self.roll.set_message("Turn on Find notes to see them here.")
+            self.roll.set_message(tr("Turn on Find notes to see them here."))
 
         self._update_meta()
         self._fill_transcript(r)
@@ -1116,38 +1199,55 @@ class MainWindow(QMainWindow):
         self.pos_slider.setRange(0, int(r.duration * 1000))
         self._sync_position(self.player.position() / 1000.0)
         self._set_combo(self.mode_box, "recording")
+        self._extras_show_result(r)
         self._update_controls()
 
     def _update_meta(self) -> None:
         r = self.result
         if not r:
             return
-        parts = [f"{format_time(r.duration, 0)} long"]
-        if r.key:
-            parts.append(f"probably {r.key.name}")
+        parts = [tr("{time} long").format(time=format_time(r.duration, 0))]
+        if self.song_key:
+            from .music import key_name
+            parts.append(tr("in {key}").format(key=key_name(*self.song_key)))
+        elif r.key:
+            parts.append(tr("probably {key}").format(key=r.key.name))
         if r.tempo:
-            parts.append(f"around {r.tempo:.0f} BPM")
+            parts.append(tr("around {bpm} BPM").format(bpm=f"{r.tempo:.0f}"))
+            if r.meter != 4:
+                parts.append(f"{r.meter}/4")
         text = ", ".join(parts)
         self.meta_label.setText(text[:1].upper() + text[1:])
 
     def _fill_transcript(self, r: Result) -> None:
+        self.transcript.clear()
         items = []
+        lines = self.translation["lines"] if self.translation else []
         for i, seg in enumerate(r.segments):
-            item = QTreeWidgetItem([format_time(seg.start, 1), seg.text])
+            item = QTreeWidgetItem([format_time(seg.start, 1), seg.text, lines[i] if i < len(lines) else ""])
             item.setData(0, DATA_ROLE, i)
             item.setTextAlignment(0, Qt.AlignRight | Qt.AlignTop)
             items.append(item)
         self.transcript.addTopLevelItems(items)
+        self.transcript.setColumnWidth(1, 520 if lines else 800)
         self._seg_starts = [s.start for s in r.segments]
+        self._current_seg = -1
+        self._apply_transcript_view()
+        self._refresh_transcript_label()
+
+    def _refresh_transcript_label(self) -> None:
+        r = self.result
+        if not r:
+            return
         if r.words_requested:
             if r.segments:
-                lang = LANGUAGE_NAMES.get(r.language or "", (r.language or "").upper())
-                how = "Translated to English from" if r.translated else "Language:"
-                self.lang_label.setText(f"{how} {lang}. Click a line to jump to it.")
+                lang = tr(LANGUAGE_NAMES.get(r.language or "", (r.language or "").upper()))
+                how = tr("Translated to English from {lang}.") if r.translated else tr("Language: {lang}.")
+                self.lang_label.setText(how.format(lang=lang) + " " + tr("Click a line to jump to it."))
             else:
-                self.lang_label.setText("No words were found.")
+                self.lang_label.setText(tr("No words were found."))
         else:
-            self.lang_label.setText("Transcription was off for this run.")
+            self.lang_label.setText(tr("Transcription was off for this run."))
 
     def _fill_notes_table(self) -> None:
         """Lists the notes that are shown: not muted, passing the scale filter, and (when
@@ -1175,7 +1275,7 @@ class MainWindow(QMainWindow):
                 if span and (n.end < span[0] or n.start > span[1]):
                     continue
                 length = n.end - n.start
-                item = SortItem([note_label(n.pitch, track.name), track.name, format_time(n.start, 2),
+                item = SortItem([note_label(n.pitch, track.name), tr(track.name), format_time(n.start, 2),
                                  f"{length:.2f} s", f"{n.velocity * 100:.0f}%"])
                 item.setData(0, SORT_ROLE, n.pitch)
                 item.setData(1, SORT_ROLE, ti)
@@ -1192,15 +1292,14 @@ class MainWindow(QMainWindow):
             table.setColumnWidth(col, width)
         table.setUpdatesEnabled(True)
 
-        notes = "note" if len(items) == 1 else "notes"
-        text = f"{len(items)} {notes} shown"
+        text = tr_n(len(items), "{n} note shown", "{n} notes shown")
         hidden = []
         if len(items) != total:
-            text += f" of {total}"
+            text += " " + tr("of {total}").format(total=total)
         if flt.active:
             hidden.append(flt.describe())
         if span:
-            hidden.append(f"inside {format_time(span[0], 1)} to {format_time(span[1], 1)}")
+            hidden.append(tr("inside {a} to {b}").format(a=format_time(span[0], 1), b=format_time(span[1], 1)))
         if hidden:
             text += " (" + ", ".join(hidden) + ")"
         self.notes_label.setText(text)
@@ -1215,6 +1314,8 @@ class MainWindow(QMainWindow):
         self.part_rows: list[PartRow] = []
         for track in tracks:
             row = PartRow(track)
+            if i18n.language() != "en":
+                i18n.retranslate(row, i18n.language())
             row.changed.connect(self._on_parts_changed)
             row.instrumentPicked.connect(lambda key, t=track: self._on_instrument_picked(t, key))
             self.parts_layout.addWidget(row)
@@ -1245,12 +1346,13 @@ class MainWindow(QMainWindow):
         current = box.currentData()
         box.blockSignals(True)
         box.clear()
-        for ti, t in enumerate(self._tracks()):
+        tracks = self._tracks()
+        for ti, t in enumerate(tracks):
             if t.visible:
-                box.addItem(t.name, ti)
+                box.addItem(tr(t.name), ti)
         pick = box.findData(current) if current is not None else -1
         if pick < 0:
-            pitched = [i for i in range(box.count()) if box.itemText(i) != "Drums"]
+            pitched = [i for i in range(box.count()) if tracks[box.itemData(i)].name != "Drums"]
             pick = pitched[0] if pitched else 0
         if box.count():
             box.setCurrentIndex(pick)
@@ -1268,10 +1370,12 @@ class MainWindow(QMainWindow):
         self.roll.set_filter(flt)
         self._schedule_refresh()
         self._queue_sound()
+        if self.result and (self.chords.lane_source() == "notes" or not self.result.chords):
+            self._update_chord_lane()
         if flt.active:
-            self.status_text.setText(f"Showing {flt.describe()}.")
+            self.status_text.setText(tr("Showing {what}.").format(what=flt.describe()))
         else:
-            self.status_text.setText("Showing every note.")
+            self.status_text.setText(tr("Showing every note."))
 
     # Span, loop, zoom ---------------------------------------------------------------
 
@@ -1282,10 +1386,11 @@ class MainWindow(QMainWindow):
         self._update_selection_details()
         self._schedule_refresh()
         if span:
-            self.status_text.setText(f"Span {format_time(span[0], 2)} to {format_time(span[1], 2)} selected. "
-                                     "See the Selection tab for details, press Z to zoom, L to loop.")
+            self.status_text.setText(tr("Span {a} to {b} selected. See the Selection tab for details, "
+                                        "press Z to zoom, L to loop.").format(a=format_time(span[0], 2),
+                                                                             b=format_time(span[1], 2)))
         else:
-            self.status_text.setText("Span cleared.")
+            self.status_text.setText(tr("Span cleared."))
 
     def _update_span_controls(self, span) -> None:
         has = span is not None
@@ -1294,11 +1399,12 @@ class MainWindow(QMainWindow):
         self.loop_btn.setEnabled(has)
         if has:
             a, b = span
-            self.span_label.setText(f"Span {format_time(a, 2)} to {format_time(b, 2)}  ({b - a:.2f} s)")
+            self.span_label.setText(tr("Span {a} to {b}").format(a=format_time(a, 2), b=format_time(b, 2))
+                                    + f"  ({b - a:.2f} s)")
         else:
-            self.span_label.setText("Drag across the piano roll to select a span")
+            self.span_label.setText(tr("Drag across the piano roll to select a span"))
         self.span_label.setToolTip(self.span_label.text())
-        self.zoom_btn.setText("Zoom back" if self.roll_saved_view() else "Zoom to span")
+        self.zoom_btn.setText(tr("Zoom back") if self.roll_saved_view() else tr("Zoom to span"))
         if hasattr(self, "roll"):
             self.roll.set_loop_visual(self.loop_btn.isChecked() and has)
         self._update_ticker_interval()
@@ -1320,9 +1426,9 @@ class MainWindow(QMainWindow):
     def _on_loop_toggled(self, on: bool) -> None:
         self._update_span_controls(self.roll.span)
         if on and self.roll.span:
-            self.status_text.setText("Looping the selected span. Press L or click Loop again to turn it off.")
+            self.status_text.setText(tr("Looping the selected span. Press L or click Loop again to turn it off."))
         elif not on:
-            self.status_text.setText("Loop off.")
+            self.status_text.setText(tr("Loop off."))
 
     def _loop_span(self) -> tuple[float, float] | None:
         if self.loop_btn.isChecked() and self.roll.span:
@@ -1339,20 +1445,22 @@ class MainWindow(QMainWindow):
         if not r or not span:
             self.selection.show_none()
             return
-        self.selection.show_span(span[0], span[1], r.tracks, self.note_filter, r.beats, r.segments)
+        self.selection.show_span(span[0], span[1], r.tracks, self.note_filter, r.beats, r.segments, r.meter,
+                                 self._current_lane())
 
     # Editing --------------------------------------------------------------------
 
     def _set_edit_mode(self, on: bool) -> None:
         self.edit_box.setVisible(on)
         self.roll.set_edit_mode(on)
+        self.chords.set_edit_mode(on)
         if on:
             self._refresh_edit_tracks()
-            self.status_text.setText(
+            self.status_text.setText(tr(
                 "Edit mode. Drag a note to move it, drag its right edge to resize, double-click empty space "
-                "to add one, Delete removes the selected notes. Hold Shift and drag for a span.")
+                "to add one, Delete removes the selected notes. Hold Shift and drag for a span."))
         else:
-            self.status_text.setText("Edit mode off.")
+            self.status_text.setText(tr("Edit mode off."))
         self._update_undo_buttons()
 
     def _on_snap_changed(self, _index: int) -> None:
@@ -1381,8 +1489,8 @@ class MainWindow(QMainWindow):
         if not self._edit_hint_shown and self.mode_box.currentData() == "recording":
             # The recording itself can't change, so tell people where their edits can be heard.
             self._edit_hint_shown = True
-            self.status_text.setText("Your changes show in the piano roll. Set Play (bottom bar) to "
-                                     "Notes on instruments to hear them.")
+            self.status_text.setText(tr("Your changes show in the piano roll. Set Play (bottom bar) to "
+                                        "Notes on instruments to hear them."))
 
     def _after_notes_changed(self) -> None:
         self._edit_count += 1
@@ -1396,25 +1504,25 @@ class MainWindow(QMainWindow):
             return
         self._redo.append(self._snapshot())
         self._restore(self._undo.pop())
-        self.status_text.setText("Undone.")
+        self.status_text.setText(tr("Undone."))
 
     def redo(self) -> None:
         if not self.roll.edit_mode or not self._redo:
             return
         self._undo.append(self._snapshot())
         self._restore(self._redo.pop())
-        self.status_text.setText("Redone.")
+        self.status_text.setText(tr("Redone."))
 
     def _revert_all(self) -> None:
         if not self._original or not self._undo:
             return
-        answer = QMessageBox.question(self, APP_NAME, "Put every note back the way it was found? "
-                                      "You can still undo this.")
+        answer = QMessageBox.question(self, APP_NAME, tr("Put every note back the way it was found? "
+                                                         "You can still undo this."))
         if answer != QMessageBox.Yes:
             return
         self._on_edit_started()
         self._restore(self._original)
-        self.status_text.setText("Every note is back the way it was found.")
+        self.status_text.setText(tr("Every note is back the way it was found."))
 
     def _update_undo_buttons(self) -> None:
         editing = self.roll.edit_mode if hasattr(self, "roll") else False
@@ -1426,15 +1534,16 @@ class MainWindow(QMainWindow):
         """True when notes were changed and not exported since."""
         return self._edit_count != self._saved_count
 
-    def _confirm_discard_edits(self, reason: str = "Opening another file closes this one.") -> bool:
+    def _confirm_discard_edits(self, reason: str | None = None) -> bool:
         if not self._has_edits():
             return True
-        box = QMessageBox(QMessageBox.Warning, APP_NAME, "You have edited notes that are not exported.",
+        reason = reason or tr("Opening another file closes this one.")
+        box = QMessageBox(QMessageBox.Warning, APP_NAME, tr("You have edited notes that are not saved."),
                           QMessageBox.NoButton, self)
-        box.setInformativeText(f"{reason} Export them first with Export, Notes as MIDI, "
-                               "or continue and lose the changes.")
-        keep = box.addButton("Go back", QMessageBox.RejectRole)
-        box.addButton("Continue and lose the changes", QMessageBox.DestructiveRole)
+        box.setInformativeText(reason + " " + tr("Save the project (Ctrl+S) or export the notes first, "
+                                                 "or continue and lose the changes."))
+        keep = box.addButton(tr("Go back"), QMessageBox.RejectRole)
+        box.addButton(tr("Continue and lose the changes"), QMessageBox.DestructiveRole)
         box.setDefaultButton(keep)
         box.exec()
         return box.clickedButton() is not keep
@@ -1449,12 +1558,12 @@ class MainWindow(QMainWindow):
         if self.roll.edit_mode and notes:
             if len(notes) == 1:
                 n = notes[0]
-                self.status_text.setText(f"{note_name(n.pitch)} at {format_time(n.start, 2)}, "
-                                         f"{n.end - n.start:.2f} s long. Drag to move, drag the right edge "
-                                         "to resize, Delete to remove.")
+                self.status_text.setText(tr("{note} at {time}, {length} s long. Drag to move, drag the right edge "
+                                            "to resize, Delete to remove.").format(
+                    note=note_name(n.pitch), time=format_time(n.start, 2), length=f"{n.end - n.start:.2f}"))
             else:
-                self.status_text.setText(f"{len(notes)} notes selected. Drag to move them together, "
-                                         "arrow keys nudge them, Delete removes them.")
+                self.status_text.setText(tr("{n} notes selected. Drag to move them together, "
+                                            "arrow keys nudge them, Delete removes them.").format(n=len(notes)))
 
     def _on_strength_changed(self, value: int) -> None:
         if not self.roll.selected:
@@ -1499,7 +1608,10 @@ class MainWindow(QMainWindow):
             r.key = estimate_key(pitch_class_weights(pitched)) if pitched else None
             self.summary.set_result(r)
             self.scale_filter.set_detected_key(r.key)
+            self.chords._song_key = (r.key.tonic, r.key.mode) if r.key else self.chords._song_key
             self._update_meta()
+            if self.chords.lane_source() == "notes" or not r.chords:
+                self._update_chord_lane()
 
     # Interaction between views ------------------------------------------------------
 
@@ -1521,8 +1633,9 @@ class MainWindow(QMainWindow):
         n = self.result.tracks[ti].notes[ni] if self.result else None
         if n:
             track = self.result.tracks[ti]
-            self.status_text.setText(f"{note_label(n.pitch, track.name)} at {format_time(n.start, 2)}, "
-                                     f"{n.end - n.start:.2f} s long ({track.name})")
+            self.status_text.setText(tr("{note} at {time}, {length} s long ({part})").format(
+                note=note_label(n.pitch, track.name), time=format_time(n.start, 2),
+                length=f"{n.end - n.start:.2f}", part=tr(track.name)))
 
     def _on_pitch_toggled(self, pitch) -> None:
         self.summary.select_pitch(pitch)
@@ -1535,12 +1648,11 @@ class MainWindow(QMainWindow):
 
     def _describe_pitch(self, pitch) -> None:
         if pitch is None or not self.result:
-            self.status_text.setText("Highlight cleared.")
+            self.status_text.setText(tr("Highlight cleared."))
             return
         count = sum(1 for t in self.result.tracks if t.visible for n in t.notes if n.pitch == pitch)
-        times = "time" if count == 1 else "times"
-        self.status_text.setText(f"Highlighting {note_name(pitch)}, played {count} {times}. "
-                                 "Click the key again or press Esc to clear.")
+        self.status_text.setText(tr("Highlighting {note}, played {times}. Click the key again or press Esc to clear.")
+                                 .format(note=note_name(pitch), times=tr_n(count, "{n} time", "{n} times")))
 
     # Playback ---------------------------------------------------------------------
 
@@ -1574,7 +1686,9 @@ class MainWindow(QMainWindow):
             notes = [] if mode == "recording" else [(n.start, n.end, n.pitch, n.velocity)
                                                     for n in t.notes if flt.allows(n.pitch, t.name == "Drums")]
             parts.append(mixer.PartSpec(t.name, t.audio, t.visible, t.instrument, notes))
-        return mixer.MixSpec(mode, r.duration, self.notes_level.value() / 100.0, self.room_chk.isChecked(), parts)
+        click = list(r.beats) if (self.click_chk.isChecked() and r.beats) else []
+        return mixer.MixSpec(mode, r.duration, self.notes_level.value() / 100.0, self.room_chk.isChecked(), parts,
+                             click=click, click_meter=r.meter, click_level=self.click_level.value() / 100.0)
 
     def _apply_sound(self) -> None:
         spec = self._make_spec()
@@ -1613,7 +1727,7 @@ class MainWindow(QMainWindow):
         self._set_source(path, keep_position=True)
 
     def _on_render_progress(self, fraction: float) -> None:
-        self.status_text.setText(f"Preparing the sound... {fraction * 100:.0f}%")
+        self.status_text.setText(tr("Preparing the sound... {n}%").format(n=f"{fraction * 100:.0f}"))
 
     def _on_rendered(self, sig: str, path: str) -> None:
         self._mix_cache[sig] = path
@@ -1627,11 +1741,11 @@ class MainWindow(QMainWindow):
                 break
         if sig == self._want_sig:
             self._load_playback(sig, path)
-            self.status_text.setText("Sound ready.")
+            self.status_text.setText(tr("Sound ready."))
 
     def _on_render_failed(self, message: str, details: str) -> None:
-        self.status_text.setText("Could not build the sound.")
-        show_message(self, QMessageBox.Warning, "Could not build the sound for playback.",
+        self.status_text.setText(tr("Could not build the sound."))
+        show_message(self, QMessageBox.Warning, tr("Could not build the sound for playback."),
                      details=details, informative=message)
 
     def _on_render_thread_finished(self) -> None:
@@ -1666,7 +1780,8 @@ class MainWindow(QMainWindow):
 
     def _on_player_error(self, error, message: str) -> None:
         if error != QMediaPlayer.NoError:
-            self.status_text.setText(f"Playback problem: {message}. You can still analyze the file.")
+            self.status_text.setText(tr("Playback problem: {message}. You can still analyze the file.").format(
+                message=message))
 
     def _duration(self) -> float:
         if self.result:
@@ -1749,9 +1864,9 @@ class MainWindow(QMainWindow):
     # Export -----------------------------------------------------------------------
 
     def _save_path(self, title: str, ext: str, filter_text: str) -> Path | None:
-        stem = self.source_path.stem if self.source_path else "audio"
+        stem = self._project_title()
         start = Path(self.settings.value("export_dir", str(self.source_path.parent if self.source_path else Path.home())))
-        path, _ = QFileDialog.getSaveFileName(self, title, str(start / f"{stem}.{ext}"), filter_text)
+        path, _ = QFileDialog.getSaveFileName(self, tr(title), str(start / f"{stem}.{ext}"), tr(filter_text))
         if not path:
             return None
         path = Path(path)
@@ -1765,21 +1880,34 @@ class MainWindow(QMainWindow):
             return False
         try:
             func(path)
-            self.status_text.setText(done.format(path=path) if done else f"Saved {path}")
+            self.status_text.setText(done.format(path=path) if done else tr("Saved {path}").format(path=path))
             return True
         except Exception as exc:
-            show_message(self, QMessageBox.Critical, "Could not save the file.", informative=str(exc))
+            show_message(self, QMessageBox.Critical, tr("Could not save the file."), informative=str(exc))
             return False
 
     def _export_text(self, kind: str) -> None:
-        segs = self.result.segments
-        title = self.source_path.stem if self.source_path else None
+        segs = self._export_segments()
+        if kind == "lrc":
+            segs = [dataclasses.replace(s, text=s.text.replace("\n", " / ")) for s in segs]
+        title = self._project_title() if self.source_path else None
         makers = {"txt": (exporters.transcript_text, "Text files (*.txt)"),
                   "srt": (exporters.transcript_srt, "Subtitles (*.srt)"),
                   "lrc": (lambda s: exporters.transcript_lrc(s, title), "Timed lyrics (*.lrc)")}
         make, filt = makers[kind]
         path = self._save_path("Save transcript", kind, filt)
         self._export(lambda p: exporters.write_text(p, make(segs)), path)
+
+    def _export_chords(self, kind: str) -> None:
+        segs = self.result.segments        # chords line up with the original words and their timing
+        lane = self._current_lane()
+        title = self._project_title()
+        if kind == "txt":
+            path = self._save_path("Save lyrics with chords", "txt", "Text files (*.txt)")
+            self._export(lambda p: exporters.write_text(p, exporters.lyrics_with_chords(segs, lane, title)), path)
+        else:
+            path = self._save_path("Save lyrics with chords (ChordPro)", "cho", "ChordPro files (*.cho *.chordpro)")
+            self._export(lambda p: exporters.write_text(p, exporters.chordpro(segs, lane, title)), path)
 
     def _exportable_tracks(self):
         """The parts that are shown, with only the notes that pass the scale filter. What you
@@ -1795,7 +1923,7 @@ class MainWindow(QMainWindow):
 
     def _export_note(self, tracks) -> str:
         count = sum(len(t.notes) for t in tracks)
-        text = f"Saved {count} notes to {{path}}"
+        text = tr_n(count, "Saved {n} note to {path}", "Saved {n} notes to {path}")
         if self.note_filter.active:
             text += f" ({self.note_filter.describe()})"
         return text
@@ -1803,7 +1931,8 @@ class MainWindow(QMainWindow):
     def _export_midi(self) -> None:
         path = self._save_path("Save notes as MIDI", "mid", "MIDI files (*.mid)")
         tracks = self._exportable_tracks()
-        if self._export(lambda p: exporters.save_midi(tracks, p, self.result.tempo), path, self._export_note(tracks)):
+        if self._export(lambda p: exporters.save_midi(tracks, p, self.result.tempo, self.result.meter), path,
+                        self._export_note(tracks)):
             self._saved_count = self._edit_count
 
     def _export_csv(self) -> None:
@@ -1814,18 +1943,18 @@ class MainWindow(QMainWindow):
 
     def _export_stems(self) -> None:
         start = self.settings.value("export_dir", str(self.source_path.parent))
-        folder = QFileDialog.getExistingDirectory(self, "Choose a folder for the stems", start)
+        folder = QFileDialog.getExistingDirectory(self, tr("Choose a folder for the stems"), start)
         if not folder:
             return
-        stem = self.source_path.stem
+        stem = self._project_title()
         try:
             for name, src in self.result.audio_files.items():
                 if name != "Original":
-                    shutil.copyfile(src, Path(folder) / f"{stem} - {name}.wav")
+                    shutil.copyfile(src, Path(folder) / f"{stem} - {tr(name)}.wav")
             self.settings.setValue("export_dir", folder)
-            self.status_text.setText(f"Saved stems to {folder}")
+            self.status_text.setText(tr("Saved stems to {folder}").format(folder=folder))
         except Exception as exc:
-            show_message(self, QMessageBox.Critical, "Could not save the stems.", informative=str(exc))
+            show_message(self, QMessageBox.Critical, tr("Could not save the stems."), informative=str(exc))
 
     def _export_sound(self) -> None:
         """Saves exactly what the Play bar plays right now."""
@@ -1838,7 +1967,7 @@ class MainWindow(QMainWindow):
         if spec.is_plain():
             self._export(lambda p: shutil.copyfile(self.result.audio_files["Original"], p), path)
             return
-        self.status_text.setText("Saving...")
+        self.status_text.setText(tr("Saving..."))
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self._export(lambda p: mixer.render_mix(spec, p), path)
@@ -1847,8 +1976,8 @@ class MainWindow(QMainWindow):
 
     def _copy_transcript(self) -> None:
         if self.result and self.result.segments:
-            QApplication.clipboard().setText(exporters.transcript_text(self.result.segments))
-            self.status_text.setText("Transcript copied.")
+            QApplication.clipboard().setText(exporters.transcript_text(self._export_segments()))
+            self.status_text.setText(tr("Transcript copied."))
 
     # Window events ------------------------------------------------------------------
 
@@ -1859,27 +1988,31 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event) -> None:  # noqa: N802
         for url in event.mimeData().urls():
             if url.isLocalFile():
-                if self._busy():
-                    self.status_text.setText("Wait for the current analysis to finish first.")
+                if self._busy() or self._project_thread is not None:
+                    self.status_text.setText(tr("Wait for the current analysis to finish first."))
                 else:
                     self.open_file(url.toLocalFile())
                 break
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.thread:
-            answer = QMessageBox.question(self, APP_NAME, "An analysis is still running. Quit anyway?")
+            answer = QMessageBox.question(self, APP_NAME, tr("An analysis is still running. Quit anyway?"))
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
             self.thread.stop()
             self.hide()
             self.thread.wait()
-        elif not self._confirm_discard_edits("Closing the app discards them."):
+        elif not self._confirm_discard_edits(tr("Closing the app discards them.")):
             event.ignore()
             return
         if self.render_thread:
             self.render_thread.stop()
             self.render_thread.wait()
+        for job in (self._project_thread, self._translate_thread):
+            if job is not None:
+                job.stop()
+                job.wait(20000)
         self._save_settings()
         self.player.stop()
         self.player.setSource(QUrl())

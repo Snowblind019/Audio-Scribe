@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Audio Scribe installer for Linux.
 #
-#   ./install.sh                 install, asks about optional stem separation
+#   ./install.sh                 install, asks about the optional parts
 #   ./install.sh --with-stems    also install stem separation (Demucs, about 1 GB)
 #   ./install.sh --no-stems      skip stem separation without asking
 #   ./install.sh --cuda          use an NVIDIA GPU build of PyTorch for stems
+#   ./install.sh --with-youtube  also install YouTube download (yt-dlp and Deno)
+#   ./install.sh --no-youtube    skip YouTube download without asking
+#   ./install.sh --update-youtube  get the newest yt-dlp and Deno (when YouTube changed)
 #   ./install.sh --yes           accept the default answer for every question
 #   ./install.sh --uninstall     remove the launcher, menu entry, and .venv
 #
@@ -35,6 +38,7 @@ TOOLS_DIR="$APP_DIR/.tools"
 TORCH_VERSION="2.14.0"
 
 STEMS="ask"
+YOUTUBE="ask"
 GPU="cpu"
 ASSUME_YES=0
 UNINSTALL=0
@@ -45,7 +49,7 @@ note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33mWarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 confirm() {
     # confirm "Question" y|n   (second argument is the default)
@@ -74,6 +78,9 @@ for arg in "$@"; do
         --with-stems) STEMS="yes" ;;
         --no-stems)   STEMS="no" ;;
         --cuda)       GPU="cuda" ;;
+        --with-youtube)   YOUTUBE="yes" ;;
+        --no-youtube)     YOUTUBE="no" ;;
+        --update-youtube) YOUTUBE="update" ;;
         -y|--yes)     ASSUME_YES=1 ;;
         --uninstall)  UNINSTALL=1 ;;
         -h|--help)    usage; exit 0 ;;
@@ -203,11 +210,30 @@ if [ "$STEMS" = "yes" ]; then
     uv_install --require-hashes --no-deps -r "$APP_DIR/requirements-stems.txt"
 fi
 
-# 5. Check that everything imports --------------------------------------------------------
+# 5. Optional YouTube download -----------------------------------------------------------
+if [ "$YOUTUBE" = "ask" ]; then
+    say "Optional: YouTube download"
+    note "Paste a YouTube link in the app and get the audio as MP3, M4A, Opus, FLAC or WAV."
+    note "Uses yt-dlp and Deno (Deno runs the small checks YouTube needs). About 50 MB."
+    if confirm "Install YouTube download?" y; then YOUTUBE="yes"; else YOUTUBE="no"; fi
+fi
+
+if [ "$YOUTUBE" = "yes" ]; then
+    say "Installing yt-dlp and Deno"
+    uv_install --require-hashes -r "$APP_DIR/requirements-youtube.txt"
+elif [ "$YOUTUBE" = "update" ]; then
+    say "Updating yt-dlp and Deno to the newest versions"
+    note "YouTube changes often, and an older yt-dlp can stop working. This gets the newest"
+    note "release from PyPI over HTTPS. Unlike everything else here it is not hash-pinned,"
+    note "because the pinned hashes are for one fixed version."
+    uv_install --upgrade-package yt-dlp --upgrade-package yt-dlp-ejs --upgrade-package deno "yt-dlp[default]" deno
+fi
+
+# 6. Check that everything imports --------------------------------------------------------
 say "Checking the install"
 PYTHONPATH="$APP_DIR" "$PY" -m audioscribe --check || die "The check failed. See the list above for what is missing."
 
-# 6. Launcher, icon, and menu entry ---------------------------------------------------------
+# 7. Launcher, icon, and menu entry ---------------------------------------------------------
 say "Adding the launcher and menu entry"
 mkdir -p "$BIN_DIR" "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_FILE")"
 QT_QPA_PLATFORM=offscreen PYTHONPATH="$APP_DIR" "$PY" -m audioscribe --write-icons "$APP_DIR/audioscribe/assets" >/dev/null

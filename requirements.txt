@@ -1055,3 +1055,12 @@ urllib3==2.8.0 \
     --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
     --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
     # via requests
+verovio==6.3.0 \
+    --hash=sha256:0896a708a5b130cc5bab3a168d70435ad8b3e54692088e7e5e281fef11c0b05d \
+    --hash=sha256:33dc3b6816896a649198acd7cce291f54636fbfffa893dd78d84c3073b40d87c \
+    --hash=sha256:654a96990d0ab49cd805d6c39e2c313c640a117a761a07f6a6320d82af94c53a \
+    --hash=sha256:92f1b3065db2e4e2e6717eafe2d010aa53a194c9547249aa5b5a64f51fc099f2 \
+    --hash=sha256:c3a608b590fe3ca625eba29b547be8727063f47feb10bd5e42c548f87aeb331e \
+    --hash=sha256:c842f5d21d31c3d47e835e07565a9b8623b78feef527affe149ceadd9ecaa55a \
+    --hash=sha256:cc8bab65570ccb38d6a440fa13d3e4820df34ee9ca483decdbe8371c4291b1a8
+    # via -r requirements.in

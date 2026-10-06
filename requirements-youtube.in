@@ -1,0 +1,6 @@
+# Optional YouTube download. requirements-youtube.txt is generated from this file
+# with every package pinned and hash-checked, using requirements.txt as a constraint
+# so shared packages keep the same versions.
+# Deno runs the small JavaScript checks YouTube needs before it hands out audio.
+yt-dlp[default]==2026.8.19
+deno==2.9.7

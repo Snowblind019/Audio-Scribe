@@ -6,6 +6,7 @@ Layout inside the widget:
     |        | time ruler                                   |
     | corner +----------------------------------------------+
     |        | lyrics lane (only when words were found)     |
+    |        | chord lane (only when chords were found)     |
     +--------+----------------------------------------------+
     | keys   | note grid                                    |
     |        |                                              |
@@ -19,24 +20,30 @@ smooth with thousands of notes.
 Two modes:
   * View (the default): click to move the playhead, drag across the grid to select a
     span of time, drag the span's edges to change it.
-  * Edit: move, resize, add and delete notes. Nothing can be changed by accident
-    because none of this works until Edit mode is switched on.
+  * Edit: move, resize, add and delete notes, and drop chords from the Chords tab.
+    Nothing can be changed by accident because none of this works until Edit mode
+    is switched on.
 """
 
 from __future__ import annotations
 
 import bisect
+import json
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QToolTip
 
 from .engine import Note
-from .music import NoteFilter, format_time, is_black, note_label, note_name, pitch_hz
+from .i18n import tr
+from .music import NoteFilter, format_time, is_black, label_pc, note_label, note_name, pitch_hz
+
+MIME_CHORDS = "application/x-audioscribe-chords"
 
 KEY_W = 58
 RULER_H = 24
 LYRIC_H = 26
+CHORD_H = 22
 TIME_STEPS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600)
 LOWEST, HIGHEST = 21, 108   # the range of an 88 key piano
 EDGE_PX = 6                 # how close to the edge of a note or span counts as "the edge"
@@ -69,6 +76,9 @@ COL = {
     "span": QColor("#69A7E0"),
     "span_loop": QColor("#5CC6C0"),
     "edit": QColor("#F0B23E"),
+    "chord_block": QColor("#363E49"),
+    "chord_line": QColor("#4A5361"),
+    "ghost": QColor("#F0B23E"),
 }
 
 
@@ -107,6 +117,9 @@ class PianoRoll(QAbstractScrollArea):
     editStarted = Signal()                # about to change notes: the moment to take an undo snapshot
     notesEdited = Signal()                # notes were moved, resized, added or deleted
     auditionRequested = Signal(int, int)  # pitch, track index: play this note so it can be heard
+    chordsDropped = Signal(object, float) # chords dragged in from the Chords tab, and the time
+    dropRefused = Signal()                # chords dragged in while Edit mode is off
+    chordClicked = Signal(float, object)  # a chord in the chord lane was clicked: its start and Chord
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,6 +134,11 @@ class PianoRoll(QAbstractScrollArea):
         self.lane_starts: list[float] = []
         self.lane_max = 0.0
         self.beats: list[float] = []
+        self.meter = 4              # beats per bar, for the stronger grid lines
+        self.chord_lane: list[tuple] = []   # (start, end, Chord or None)
+        self.chord_starts: list[float] = []
+        self.drop_preview = None    # callback (payload, time) -> [(start, end, pitch, strength)]
+        self._ghost: list[tuple] | None = None
         self.pps = 60.0  # pixels per second
         self.row_h = 12
         self.lo, self.hi = 48, 84
@@ -149,12 +167,19 @@ class PianoRoll(QAbstractScrollArea):
 
         self.small_font = QFont(self.font())
         self.small_font.setPointSizeF(max(7.0, self.font().pointSizeF() * 0.85))
+        self.bold_font = QFont(self.font())
+        self.bold_font.setBold(True)
+        self.viewport().setAcceptDrops(True)
         self._update_scrollbars()
 
     # Geometry ---------------------------------------------------------------
 
     @property
     def header_h(self) -> int:
+        return RULER_H + (LYRIC_H if self.lane else 0) + (CHORD_H if self.chord_lane else 0)
+
+    @property
+    def chord_top(self) -> int:
         return RULER_H + (LYRIC_H if self.lane else 0)
 
     def _rows(self) -> int:
@@ -241,7 +266,7 @@ class PianoRoll(QAbstractScrollArea):
             self.message = ""
         else:
             self.lo, self.hi = 48, 84
-            self.message = "No notes to show." if tracks else ""
+            self.message = tr("No notes to show.") if tracks else ""
         self.selected = set()
         self.highlight_pitch = None
         self.span = None
@@ -255,8 +280,23 @@ class PianoRoll(QAbstractScrollArea):
         if self.edit_mode:
             self._add_headroom()
 
+    def set_beats(self, beats, meter: int = 4) -> None:
+        self.beats = list(beats or [])
+        self.meter = max(1, int(meter))
+        self.refresh()
+
+    def set_chords(self, chords) -> None:
+        """The chord lane: (start, end, Chord or None) for the whole song, or [] to hide it."""
+        before = bool(self.chord_lane)
+        self.chord_lane = [c for c in (chords or []) if c[1] > c[0]]
+        self.chord_starts = [c[0] for c in self.chord_lane]
+        if before != bool(self.chord_lane):
+            self._update_scrollbars()
+        self.refresh()
+
     def clear(self, message: str = "") -> None:
         self.indexes, self.lane, self.lane_starts, self.beats = [], [], [], []
+        self.chord_lane, self.chord_starts = [], []
         self.duration = 0.0
         self.lo, self.hi = 48, 84
         self.selected = set()
@@ -508,6 +548,81 @@ class PianoRoll(QAbstractScrollArea):
         self._finish_edit()
         self.auditionRequested.emit(pitch, ti)
 
+    def insert_notes(self, track_index: int, rows) -> None:
+        """Add notes as one edit (used for chords from the Chords tab): (start, end, pitch, strength)."""
+        if not (0 <= track_index < len(self.indexes)) or not rows:
+            return
+        self._begin_edit()
+        new = []
+        for start, end, pitch, vel in rows:
+            start = self._clamp_t(start)
+            end = min(self.duration, max(end, start + MIN_NOTE))
+            new.append(Note(start, end, max(LOWEST, min(HIGHEST, int(pitch))), vel, edited=True))
+        self.indexes[track_index].track.notes.extend(new)
+        self.selected = set(new)
+        pitches = [n.pitch for n in new]
+        self._extend_range(min(pitches) - 2, max(pitches) + 2)
+        self._finish_edit()
+
+    # Dragging chords in from the Chords tab ---------------------------------------
+
+    def _drop_payload(self, event) -> dict | None:
+        mime = event.mimeData()
+        if not mime.hasFormat(MIME_CHORDS):
+            return None
+        try:
+            data = json.loads(bytes(mime.data(MIME_CHORDS)).decode("utf-8"))
+            return data if isinstance(data, dict) and isinstance(data.get("chords"), list) else None
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def _drop_time(self, x: float) -> float:
+        t = self._clamp_t(self.t_of(x))
+        if self.snap_div:
+            return self._clamp_t(self.snap_time(t))
+        div, self.snap_div = self.snap_div, 1      # chords land on a beat even with snapping off
+        t = self.snap_time(t)
+        self.snap_div = div
+        return self._clamp_t(t)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._drop_payload(event) is not None and self.duration > 0:
+            event.acceptProposedAction()
+            if not self.edit_mode:
+                self.dropRefused.emit()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        payload = self._drop_payload(event)
+        if payload is None or self.duration <= 0:
+            event.ignore()
+            return
+        if not self.edit_mode:
+            self._ghost = None
+            event.ignore()
+            return
+        t = self._drop_time(event.position().x())
+        self._ghost = list(self.drop_preview(payload, t)) if self.drop_preview else []
+        event.acceptProposedAction()
+        self.viewport().update()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._ghost = None
+        self.viewport().update()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        payload = self._drop_payload(event)
+        self._ghost = None
+        self.viewport().update()
+        if payload is None or not self.edit_mode:
+            event.ignore()
+            if payload is not None:
+                self.dropRefused.emit()
+            return
+        event.acceptProposedAction()
+        self.chordsDropped.emit(payload, self._drop_time(event.position().x()))
+
     # Zoom and scroll ----------------------------------------------------------
 
     def _initial_zoom(self) -> None:
@@ -601,9 +716,12 @@ class PianoRoll(QAbstractScrollArea):
         if self.duration > 0:
             self._paint_span(p, w, h)
             self._paint_marquee(p, w, h)
+            self._paint_ghost(p, w, h)
             self._paint_playhead(p, h)
             if self.lane:
                 self._paint_lane(p, w)
+            if self.chord_lane:
+                self._paint_chord_lane(p, w)
             self._paint_ruler(p, w)
         else:
             p.fillRect(KEY_W, 0, w - KEY_W, self.header_h, COL["panel"])
@@ -693,7 +811,7 @@ class PianoRoll(QAbstractScrollArea):
                         p.drawLine(QPointF(x, top), QPointF(x, h))
             for i in range(i0, i1):
                 x = self.x_of(self.beats[i])
-                p.setPen(COL["bar"] if i % 4 == 0 else COL["beat"])
+                p.setPen(COL["bar"] if i % self.meter == 0 else COL["beat"])
                 p.drawLine(QPointF(x, top), QPointF(x, h))
         else:
             step = self._time_step()
@@ -833,6 +951,53 @@ class PianoRoll(QAbstractScrollArea):
                 text_end = x0 + fm.horizontalAdvance(shown) + 8
         p.restore()
 
+    def _paint_chord_lane(self, p: QPainter, w: int) -> None:
+        top = self.chord_top
+        p.fillRect(QRectF(KEY_W, top, w - KEY_W, CHORD_H), COL["panel"])
+        p.setPen(COL["panel_line"])
+        p.drawLine(QPointF(KEY_W, top + CHORD_H - 0.5), QPointF(w, top + CHORD_H - 0.5))
+        p.save()
+        p.setClipRect(QRectF(KEY_W, top, w - KEY_W, CHORD_H))
+        p.setRenderHint(QPainter.Antialiasing, True)
+        fm = QFontMetrics(self.bold_font)
+        p.setFont(self.bold_font)
+        t0, t1 = self.t_of(KEY_W), self.t_of(w)
+        i0 = max(0, bisect.bisect_right(self.chord_starts, t0) - 1)
+        i1 = bisect.bisect_right(self.chord_starts, t1)
+        for start, end, chord in self.chord_lane[i0:i1]:
+            if chord is None or end < t0:
+                continue
+            x0, x1 = self.x_of(start), self.x_of(end)
+            current = start <= self.playhead < end
+            rect = QRectF(x0 + 1, top + 3, max(2.0, x1 - x0 - 2), CHORD_H - 6)
+            p.setPen(Qt.NoPen)
+            p.setBrush(COL["chord_block"] if not current else QColor(240, 178, 62, 60))
+            p.drawRoundedRect(rect, 3, 3)
+            name = chord.name()
+            if rect.width() >= 16:
+                if fm.horizontalAdvance(name) + 6 > rect.width():
+                    name = fm.elidedText(name, Qt.ElideRight, int(rect.width() - 6))
+                p.setPen(COL["playhead"] if current else COL["text"])
+                p.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignLeft | Qt.AlignVCenter, name)
+        p.restore()
+
+    def _paint_ghost(self, p: QPainter, w: int, h: int) -> None:
+        """Where dragged-in chords would land."""
+        if not self._ghost:
+            return
+        p.save()
+        p.setClipRect(QRectF(KEY_W, self.header_h, w - KEY_W, h - self.header_h))
+        fill = QColor(COL["ghost"])
+        fill.setAlpha(70)
+        p.setBrush(fill)
+        p.setPen(QPen(COL["ghost"], 1, Qt.DashLine))
+        rh = self.row_h
+        for start, end, pitch, _vel in self._ghost:
+            y = self.y_of(pitch)
+            x0, x1 = self.x_of(start), self.x_of(end)
+            p.drawRect(QRectF(x0, y + 1, max(2.0, x1 - x0), rh - 2))
+        p.restore()
+
     def _paint_ruler(self, p: QPainter, w: int) -> None:
         p.fillRect(QRectF(KEY_W, 0, w - KEY_W, RULER_H), COL["panel"])
         p.setPen(COL["panel_line"])
@@ -896,7 +1061,7 @@ class PianoRoll(QAbstractScrollArea):
                 p.fillRect(QRectF(0, y, KEY_W, rh), QColor(10, 12, 15, 120))
             if pitch == self.highlight_pitch:
                 p.fillRect(QRectF(KEY_W - 5, y, 5, rh), COL["playhead"])
-            if pitch % 12 == 0 and rh >= 8:
+            if pitch % 12 == label_pc() and rh >= 8:
                 p.setPen(COL["key_label"])
                 p.drawText(QRectF(0, y, KEY_W - 7, rh), Qt.AlignRight | Qt.AlignVCenter, note_name(pitch))
         p.setPen(COL["panel_line"])
@@ -919,7 +1084,11 @@ class PianoRoll(QAbstractScrollArea):
         if self.lane:
             p.setPen(COL["muted"])
             p.setFont(self.small_font)
-            p.drawText(QRectF(0, RULER_H, KEY_W - 6, LYRIC_H), Qt.AlignRight | Qt.AlignVCenter, "Lyrics")
+            p.drawText(QRectF(0, RULER_H, KEY_W - 6, LYRIC_H), Qt.AlignRight | Qt.AlignVCenter, tr("Lyrics"))
+        if self.chord_lane:
+            p.setPen(COL["muted"])
+            p.setFont(self.small_font)
+            p.drawText(QRectF(0, self.chord_top, KEY_W - 6, CHORD_H), Qt.AlignRight | Qt.AlignVCenter, tr("Chords"))
 
     # Mouse --------------------------------------------------------------------
 
@@ -984,6 +1153,13 @@ class PianoRoll(QAbstractScrollArea):
                         self.auditionRequested.emit(pitch, -1)
             return
         if self.duration <= 0:
+            return
+        if self.chord_lane and self.chord_top <= y < self.chord_top + CHORD_H:
+            t = self.t_of(x)
+            i = bisect.bisect_right(self.chord_starts, t) - 1
+            if 0 <= i < len(self.chord_lane) and self.chord_lane[i][0] <= t < self.chord_lane[i][1]:
+                start, _end, chord = self.chord_lane[i]
+                self.chordClicked.emit(start, chord)
             return
         if y < self.header_h:
             self._scrubbing = True
@@ -1182,23 +1358,31 @@ class PianoRoll(QAbstractScrollArea):
             pitch = self.pitch_at(y)
             if self.lo <= pitch <= self.hi:
                 text = (f"{note_name(pitch)}  ({pitch_hz(pitch):.1f} Hz)\n"
-                        f"Click to highlight every {note_name(pitch)} and hear it")
+                        + tr("Click to highlight every {name} and hear it").format(name=note_name(pitch)))
+        elif self.chord_lane and self.chord_top <= y < self.chord_top + CHORD_H and x >= KEY_W:
+            t = self.t_of(x)
+            i = bisect.bisect_right(self.chord_starts, t) - 1
+            if 0 <= i < len(self.chord_lane) and self.chord_lane[i][2] is not None:
+                start, end, chord = self.chord_lane[i]
+                text = (f"{chord.name()}  {format_time(start, 1)} - {format_time(end, 1)}\n"
+                        + tr("Click to hear it"))
         elif hit:
             track = self.indexes[hit[0]].track
             n = track.notes[hit[1]]
             period = self.beat_period()
             length = n.end - n.start
-            beats = f"  ({length / period:.2f} beats)" if period else ""
+            beats = "  " + tr("({n} beats)").format(n=f"{length / period:.2f}") if period else ""
             name = note_label(n.pitch, track.name)
             if name != note_name(n.pitch):
                 name = f"{name}  ({note_name(n.pitch)})"
-            text = (f"{name}, {track.name}\n"
+            text = (f"{name}, {tr(track.name)}\n"
                     f"MIDI {n.pitch}, {pitch_hz(n.pitch):.1f} Hz\n"
-                    f"Start {format_time(n.start, 2)}   End {format_time(n.end, 2)}\n"
-                    f"Length {length:.2f} s{beats}\n"
-                    f"Strength {n.velocity * 100:.0f}%")
+                    + tr("Start {start}   End {end}").format(start=format_time(n.start, 2),
+                                                             end=format_time(n.end, 2)) + "\n"
+                    + tr("Length {length} s").format(length=f"{length:.2f}") + beats + "\n"
+                    + tr("Strength {n}%").format(n=f"{n.velocity * 100:.0f}"))
             if n.edited:
-                text += "\nChanged by hand"
+                text += "\n" + tr("Changed by hand")
         if text:
             QToolTip.showText(event.globalPosition().toPoint(), text, self.viewport())
         else:

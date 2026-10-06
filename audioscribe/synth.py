@@ -779,3 +779,15 @@ def render_single(key: str, pitch: int, velocity: float, seconds: float = 0.7, b
     inst = instrument(key)
     length = 0.15 if inst.one_shot else seconds
     return render_preview(key, [(0.0, length, int(pitch), velocity)], bank)
+
+
+# Click track ------------------------------------------------------------------------------
+
+def click_sound(accent: bool) -> np.ndarray:
+    """A short woodblock-like tick. The first beat of a bar is higher and louder."""
+    n = int(0.045 * SR)
+    t = np.arange(n) / SR
+    freq = 1760.0 if accent else 1320.0
+    env = np.exp(-t / 0.009)
+    tone = np.sin(2 * np.pi * freq * t) + 0.35 * np.sin(2 * np.pi * freq * 2.01 * t)
+    return (tone * env * (0.55 if accent else 0.38)).astype(np.float32)

@@ -51,6 +51,7 @@ QTabBar::tab {{
     background: transparent; color: {muted}; padding: 7px 16px; border: none;
     border-bottom: 2px solid transparent;
 }}
+QTabWidget#ChordTabs QTabBar::tab {{ padding: 7px 10px; }}
 QTabBar::tab:selected {{ color: {text}; border-bottom: 2px solid {accent}; }}
 QTabBar::tab:hover {{ color: {text}; }}
 QSplitter::handle {{ background: {line}; }}
@@ -194,6 +195,30 @@ def run_check() -> int:
         return "ok"
 
     report("Basic Pitch", basic_pitch)
+
+    def sheet_music() -> str:
+        import verovio
+        return f"ok (Verovio {verovio.toolkit(False).getVersion().split('-')[0]})"
+
+    report("Sheet music", sheet_music)
+
+    def translation() -> str:
+        import ctranslate2
+        import tokenizers
+        return f"ok (CTranslate2 {ctranslate2.__version__}, tokenizers {tokenizers.__version__})"
+
+    report("Lyrics translation", translation)
+
+    from . import youtube
+    if youtube.available():
+        def youtube_check() -> str:
+            if not youtube.deno_path():
+                raise RuntimeError("Deno was not found")
+            return youtube.versions()
+
+        report("YouTube download", youtube_check)
+    else:
+        print(f"  {'YouTube download':<22} not installed (optional)")
 
     from .engine import cuda_available, stems_available
     if stems_available():

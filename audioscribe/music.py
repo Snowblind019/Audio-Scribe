@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import bisect
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 
-NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+from .i18n import tr
+
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]  # letters with sharps
 BLACK_KEYS = {1, 3, 6, 8, 10}
 MAJOR_STEPS = (0, 2, 4, 5, 7, 9, 11)
 MINOR_STEPS = (0, 2, 3, 5, 7, 8, 10)
@@ -18,9 +19,111 @@ _MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2
 _MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
 
+# Note names ---------------------------------------------------------------------------
+#
+# Every name shown anywhere in the app goes through pc_name() or note_name(), so one
+# setting changes them all:
+#   letters   C, C#, D ...            (flats instead of sharps in flat keys: Bb, Eb ...)
+#   fixed     Do, Do#, Re ... Si      (Do is always C, as taught in Romania, Italy, Spain ...)
+#   fixed_ti  the same with Ti instead of Si
+#   movable   Do is the key note of the song, so a song in G calls G "Do"
+
+NAME_STYLES = [("letters", "C D E"), ("fixed", "Do Re Mi"), ("fixed_ti", "Do Re Mi (Ti)"),
+               ("movable", "Movable Do")]
+
+_LETTERS_SHARP = NOTE_NAMES
+_LETTERS_FLAT = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+_FIXED_SHARP = ["Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"]
+_FIXED_FLAT = ["Do", "Reb", "Re", "Mib", "Mi", "Fa", "Solb", "Sol", "Lab", "La", "Sib", "Si"]
+# Movable Do counts up from the key note. The chromatic names are the usual mix:
+# Ra (flat 2), Me (flat 3), Fi (sharp 4), Le (flat 6), Te (flat 7).
+_MOVABLE = ["Do", "Ra", "Re", "Me", "Mi", "Fa", "Fi", "Sol", "Le", "La", "Te", "Ti"]
+
+# Keys written with flats: F, Bb, Eb, Ab, Db, Gb major and D, G, C, F, Bb, Eb minor.
+_FLAT_MAJOR = {5, 10, 3, 8, 1, 6}
+_FLAT_MINOR = {2, 7, 0, 5, 10, 3}
+
+
+class _Naming:
+    style = "letters"
+    tonic: int | None = None   # key note of the song, used by movable Do and for flats
+    mode = "major"
+
+
+_naming = _Naming()
+
+
+def set_naming(style: str | None = None, tonic: int | None = -1, mode: str | None = None) -> None:
+    """Change how notes are named. tonic=-1 leaves the key as it was, None means no key."""
+    if style is not None and style in dict(NAME_STYLES):
+        _naming.style = style
+    if tonic != -1:
+        _naming.tonic = tonic
+    if mode is not None:
+        _naming.mode = mode
+
+
+def naming_style() -> str:
+    return _naming.style
+
+
+def uses_flats(tonic: int | None = None, mode: str | None = None) -> bool:
+    tonic = _naming.tonic if tonic is None else tonic
+    mode = mode or _naming.mode
+    if tonic is None:
+        return False
+    return tonic in (_FLAT_MINOR if mode == "minor" else _FLAT_MAJOR)
+
+
+def letter_name(pc: int, flats: bool | None = None) -> str:
+    """Always a letter name (used where a file format needs one)."""
+    flats = uses_flats() if flats is None else flats
+    return (_LETTERS_FLAT if flats else _LETTERS_SHARP)[pc % 12]
+
+
+def pc_name(pc: int, absolute: bool = False, flats: bool | None = None) -> str:
+    """Name of a pitch class (0 = C) in the chosen style.
+
+    absolute=True names it the same way for every key, which is what key names need:
+    with movable Do a key is still called by its fixed name (a song "in Sol major")."""
+    pc %= 12
+    style = _naming.style
+    flats = uses_flats() if flats is None else flats
+    if style == "movable" and not absolute:
+        if _naming.tonic is None:
+            return (_FIXED_FLAT if flats else _FIXED_SHARP)[pc]
+        return _MOVABLE[(pc - _naming.tonic) % 12]
+    if style in ("fixed", "fixed_ti", "movable"):
+        name = (_FIXED_FLAT if flats else _FIXED_SHARP)[pc]
+        if style == "fixed_ti" and name.startswith("Si"):
+            name = "Ti" + name[2:]
+        return name
+    return (_LETTERS_FLAT if flats else _LETTERS_SHARP)[pc]
+
+
+def label_pc() -> int:
+    """The note the piano keyboard writes its octave labels on: C, or Do in movable Do."""
+    if _naming.style == "movable" and _naming.tonic is not None:
+        return _naming.tonic
+    return 0
+
+
+def chord_root_name(pc: int) -> str:
+    """A chord root, spelled the way chord charts do: the chords borrowed from minor (flat 2,
+    flat 3, flat 6, flat 7 of the key) use flats even in a sharp key, so C major has Ab and Bb."""
+    t = _naming.tonic
+    flats = True if (t is not None and (pc - t) % 12 in (1, 3, 8, 10)) else None
+    return pc_name(pc, flats=flats)
+
+
 def note_name(pitch: int) -> str:
-    """MIDI pitch to a name like C4 (middle C is 60)."""
-    return f"{NOTE_NAMES[pitch % 12]}{pitch // 12 - 1}"
+    """MIDI pitch to a name like C4 or Do4 (middle C is 60)."""
+    return f"{pc_name(pitch)}{pitch // 12 - 1}"
+
+
+def key_name(tonic: int, mode: str) -> str:
+    """A key such as "G major" or "Sol major", in the current language."""
+    return f"{pc_name(tonic, absolute=True)} {tr(mode)}"
 
 
 def is_black(pitch: int) -> bool:
@@ -46,11 +149,15 @@ class KeyEstimate:
     tonic: int
     mode: str  # "major" or "minor"
     confidence: str  # "high", "medium" or "low"
-    alternative: str | None = None
+    alternative: tuple[int, str] | None = None   # the runner up (tonic, mode) when it's close
 
     @property
     def name(self) -> str:
-        return f"{NOTE_NAMES[self.tonic]} {self.mode}"
+        return key_name(self.tonic, self.mode)
+
+    @property
+    def alternative_name(self) -> str | None:
+        return key_name(*self.alternative) if self.alternative else None
 
     @property
     def scale(self) -> set[int]:
@@ -85,7 +192,7 @@ def estimate_key(weights: list[float]) -> KeyEstimate | None:
         confidence = "medium"
     else:
         confidence = "low"
-    alternative = f"{NOTE_NAMES[second[1]]} {second[2]}" if margin < 0.05 else None
+    alternative = (second[1], second[2]) if margin < 0.05 else None
     return KeyEstimate(best[1], best[2], confidence, alternative)
 
 
@@ -110,7 +217,7 @@ KICK_PITCH, SNARE_PITCH, HAT_PITCH = 36, 38, 42
 def note_label(pitch: int, part: str | None = None) -> str:
     """Note name, or the drum name on the Drums part."""
     if part == "Drums" and pitch in DRUM_NAMES:
-        return DRUM_NAMES[pitch]
+        return tr(DRUM_NAMES[pitch])
     return note_name(pitch)
 
 
@@ -164,7 +271,8 @@ class NoteFilter:
     outside: bool = False                   # True: show the notes that are NOT in `classes`
     low: int = 0
     high: int = 127
-    label: str = ""
+    scale_root: int | None = None           # set when `classes` is a named scale
+    scale_name: str = ""                    # English scale name, for example "Major"
 
     def allows(self, pitch: int, drum: bool = False) -> bool:
         """Drum hits are never filtered: their "pitch" only says which drum it is, so a
@@ -184,76 +292,12 @@ class NoteFilter:
     def describe(self) -> str:
         parts = []
         if self.classes is not None:
-            names = self.label or ", ".join(NOTE_NAMES[c] for c in sorted(self.classes))
-            parts.append(f"not in {names}" if self.outside else f"only {names}")
+            if self.scale_name and self.scale_root is not None:
+                names = f"{pc_name(self.scale_root, absolute=True)} {tr(self.scale_name).lower()}"
+            else:
+                names = ", ".join(pc_name(c) for c in sorted(self.classes))
+            parts.append((tr("not in {names}") if self.outside else tr("only {names}")).format(names=names))
         if self.low > 0 or self.high < 127:
-            parts.append(f"{note_name(max(self.low, 0))} to {note_name(min(self.high, 127))}")
+            parts.append(tr("{low} to {high}").format(low=note_name(max(self.low, 0)),
+                                                       high=note_name(min(self.high, 127))))
         return ", ".join(parts)
-
-
-# Chords ------------------------------------------------------------------------------
-
-CHORD_TYPES = [("", (0, 4, 7)), ("m", (0, 3, 7)), ("dim", (0, 3, 6)), ("aug", (0, 4, 8)),
-               ("sus4", (0, 5, 7)), ("sus2", (0, 2, 7)), ("7", (0, 4, 7, 10)), ("maj7", (0, 4, 7, 11)),
-               ("m7", (0, 3, 7, 10)), ("m7b5", (0, 3, 6, 10)), ("6", (0, 4, 7, 9)), ("m6", (0, 3, 7, 9))]
-
-
-def guess_chord(weights: list[float], bass: int | None = None) -> tuple[str, float] | None:
-    """Best matching chord name for a pitch class histogram, and a 0..1 score.
-
-    This is a rough guess. It scores how much of the sound sits on the chord's notes, and
-    penalizes chord notes that are missing and notes that don't belong."""
-    w = np.asarray(weights, dtype=float)
-    total = w.sum()
-    if total <= 0:
-        return None
-    present = np.count_nonzero(w > 0.06 * w.max())
-    if present < 2:
-        pc = int(np.argmax(w))
-        return NOTE_NAMES[pc], 0.3
-    best = None
-    for root in range(12):
-        for suffix, steps in CHORD_TYPES:
-            tones = {(root + s) % 12 for s in steps}
-            inside = sum(w[t] for t in tones) / total
-            missing = sum(1 for t in tones if w[t] < 0.06 * w.max())
-            score = inside - 0.18 * missing - 0.015 * (len(steps) - 3)
-            if bass is not None and bass == root:
-                score += 0.06
-            if best is None or score > best[0]:
-                best = (score, root, suffix, tones)
-    score, root, suffix, tones = best
-    name = f"{NOTE_NAMES[root]}{suffix}"
-    if bass is not None and bass in tones and bass != root:
-        name += f"/{NOTE_NAMES[bass]}"
-    return name, float(max(0.0, min(1.0, score)))
-
-
-def guess_chords(notes: Iterable, t0: float, t1: float, step: float) -> list[tuple[float, float, str]]:
-    """Walks through [t0, t1) in windows of `step` seconds and names the chord in each.
-    Windows with the same chord next to each other are joined."""
-    notes = sorted((n for n in notes if n.end > t0 and n.start < t1), key=lambda n: n.start)
-    starts = [n.start for n in notes]
-    longest = max((n.end - n.start for n in notes), default=0.0)
-    out: list[tuple[float, float, str]] = []
-    t = t0
-    while t < t1 - 1e-6:
-        e = min(t + step, t1)
-        weights = [0.0] * 12
-        low_pitch, low_weight = None, 0.0
-        for n in notes[bisect.bisect_left(starts, t - longest):bisect.bisect_left(starts, e)]:
-            overlap = min(n.end, e) - max(n.start, t)
-            if overlap <= 0:
-                continue
-            w = overlap * (0.5 + n.velocity)
-            weights[n.pitch % 12] += w
-            if n.pitch < 55 and w > low_weight:
-                low_pitch, low_weight = n.pitch, w
-        guess = guess_chord(weights, None if low_pitch is None else low_pitch % 12)
-        name = guess[0] if guess and guess[1] >= 0.45 else ("-" if guess is None else "?")
-        if out and out[-1][2] == name:
-            out[-1] = (out[-1][0], e, name)
-        else:
-            out.append((t, e, name))
-        t = e
-    return out

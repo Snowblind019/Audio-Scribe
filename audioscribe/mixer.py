@@ -47,6 +47,9 @@ class MixSpec:
     notes_level: float         # 0..1, only used when mode is "both"
     room: bool
     parts: list[PartSpec] = field(default_factory=list)
+    click: list[float] = field(default_factory=list)   # beat times for the click track (empty: no click)
+    click_meter: int = 4
+    click_level: float = 0.7
 
     @property
     def uses_recording(self) -> bool:
@@ -58,12 +61,15 @@ class MixSpec:
 
     def is_plain(self) -> bool:
         """True when the player can just open the original file."""
-        return self.mode == "recording" and all(p.audible for p in self.parts)
+        return self.mode == "recording" and all(p.audible for p in self.parts) and not self.click
 
     def signature(self) -> str:
         """Identifies what the output would sound like, so it is only rebuilt when it changes."""
-        h = hashlib.sha1()
+        h = hashlib.sha1(usedforsecurity=False)   # only a cache key
         h.update(f"{self.mode}|{self.duration:.3f}".encode())
+        if self.click:
+            h.update(f"|click{self.click_meter}|{self.click_level:.2f}|".encode())
+            h.update(np.asarray(self.click, dtype=np.float64).tobytes())
         if self.uses_recording:
             h.update(("|".join(sorted(p.audio or "" for p in self.parts if p.audible))).encode())
         if self.uses_notes:
@@ -131,6 +137,8 @@ def render_mix(spec: MixSpec, out_path: str | Path, report: Callable[[float], No
         room = synth.Room() if (spec.room and sets) else None
         level = spec.notes_level if spec.mode == "both" else 1.0
         level *= _auto_gain(sets, spec.duration)
+        clicks = [(int(round(t * SR)), i % max(1, spec.click_meter) == 0) for i, t in enumerate(spec.click) if t >= 0]
+        tick = {True: synth.click_sound(True) * spec.click_level, False: synth.click_sound(False) * spec.click_level}
         with wave.open(str(out_path), "wb") as out:
             out.setnchannels(2)
             out.setsampwidth(2)
@@ -147,6 +155,13 @@ def render_mix(spec: MixSpec, out_path: str | Path, report: Callable[[float], No
                     dry = synth.render_chunk(sets, pos / SR, n)
                     wet = room.process(dry) if room else np.repeat(dry[:, None], 2, axis=1)
                     buf += wet * np.float32(level)
+                for start, accent in clicks:
+                    sound = tick[accent]
+                    if start + len(sound) <= pos or start >= pos + n:
+                        continue
+                    a, b = max(start, pos), min(start + len(sound), pos + n)
+                    buf[a - pos:b - pos] += sound[a - start:b - start, None]
+                if sets or clicks:
                     buf = synth.soft_clip(buf, 0.9)
                 out.writeframes((np.clip(buf, -1.0, 1.0) * 32767.0).astype("<i2").tobytes())
                 pos += n

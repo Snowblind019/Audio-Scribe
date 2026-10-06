@@ -9,6 +9,9 @@ Options:
     -WithStems    also install stem separation (Demucs, about 1 GB)
     -NoStems      skip stem separation without asking
     -Cuda         use an NVIDIA GPU build of PyTorch for stems
+    -WithYouTube  also install YouTube download (yt-dlp and Deno)
+    -NoYouTube    skip YouTube download without asking
+    -UpdateYouTube  get the newest yt-dlp and Deno (when YouTube changed)
     -Yes          accept the default answer for every question
     -Uninstall    remove the shortcuts and the .venv and .tools folders
 
@@ -19,6 +22,9 @@ param(
     [switch]$WithStems,
     [switch]$NoStems,
     [switch]$Cuda,
+    [switch]$WithYouTube,
+    [switch]$NoYouTube,
+    [switch]$UpdateYouTube,
     [switch]$Yes,
     [switch]$Uninstall
 )
@@ -191,7 +197,30 @@ if ($installStems) {
     Invoke-Uv @('--require-hashes', '--no-deps', '-r', (Join-Path $AppDir 'requirements-stems.txt')) 'Installing Demucs'
 }
 
-# 4. Check that everything imports -------------------------------------------------------------
+# 4. Optional YouTube download -----------------------------------------------------------------
+if ($UpdateYouTube) {
+    Write-Step 'Updating yt-dlp and Deno to the newest versions'
+    Write-Note 'YouTube changes often, and an older yt-dlp can stop working. This gets the newest'
+    Write-Note 'release from PyPI over HTTPS. Unlike everything else here it is not hash-pinned,'
+    Write-Note 'because the pinned hashes are for one fixed version.'
+    Invoke-Uv @('--upgrade-package', 'yt-dlp', '--upgrade-package', 'yt-dlp-ejs', '--upgrade-package', 'deno', 'yt-dlp[default]', 'deno') 'Updating yt-dlp'
+} else {
+    $installYouTube = $false
+    if ($WithYouTube) {
+        $installYouTube = $true
+    } elseif (-not $NoYouTube) {
+        Write-Step 'Optional: YouTube download'
+        Write-Note 'Paste a YouTube link in the app and get the audio as MP3, M4A, Opus, FLAC or WAV.'
+        Write-Note 'Uses yt-dlp and Deno (Deno runs the small checks YouTube needs). About 50 MB.'
+        $installYouTube = Confirm-Choice 'Install YouTube download?' $true
+    }
+    if ($installYouTube) {
+        Write-Step 'Installing yt-dlp and Deno'
+        Invoke-Uv @('--require-hashes', '-r', (Join-Path $AppDir 'requirements-youtube.txt')) 'Installing yt-dlp'
+    }
+}
+
+# 5. Check that everything imports -------------------------------------------------------------
 Write-Step 'Checking the install'
 $env:PYTHONPATH = $AppDir
 Push-Location $AppDir
@@ -203,7 +232,7 @@ try {
 }
 if ($checkCode -ne 0) { Stop-WithError 'The check failed. See the list above for what is missing.' }
 
-# 5. Icon and shortcuts -------------------------------------------------------------------------
+# 6. Icon and shortcuts -------------------------------------------------------------------------
 Write-Step 'Adding shortcuts'
 $env:QT_QPA_PLATFORM = 'offscreen'
 & $Py -m audioscribe --write-icons $AssetsDir | Out-Null

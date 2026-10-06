@@ -9,9 +9,11 @@ from PySide6.QtWidgets import (QComboBox, QFormLayout, QFrame, QGridLayout, QHBo
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .engine import LANGUAGE_NAMES
-from .music import (NOTE_NAMES, SCALES, NoteFilter, estimate_key, format_time, guess_chords, match_scale,
-                    note_label, note_name, pitch_class_weights, scale_classes, used_notes)
+from .i18n import tr, tr_n
+from .music import (SCALES, NoteFilter, estimate_key, format_time, match_scale, note_label, note_name, pc_name,
+                    pitch_class_weights, scale_classes, used_notes)
 from .synth import DRUM_KEY, INSTRUMENTS
+from .theory import guess_chords
 
 SORT_ROLE = Qt.UserRole + 1
 DATA_ROLE = Qt.UserRole
@@ -56,6 +58,10 @@ def swatch_icon(color: str, size: int = 12) -> QIcon:
     return QIcon(pm)
 
 
+def sureness(confidence: str) -> str:
+    return tr({"high": "fairly sure", "medium": "somewhat sure", "low": "a rough guess"}[confidence])
+
+
 class PitchClassChart(QWidget):
     """Twelve bars, C to B, showing how much time each note gets."""
 
@@ -78,7 +84,7 @@ class PitchClassChart(QWidget):
         total = sum(self.weights)
         if total <= 0:
             p.setPen(QColor("#7F8996"))
-            p.drawText(self.rect(), Qt.AlignCenter, "No notes yet")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("No notes yet"))
             return
         top, bottom = 22, 24
         slot = w / 12
@@ -102,7 +108,7 @@ class PitchClassChart(QWidget):
             p.drawRoundedRect(QRectF(x, y, bar_w, max(bh, 1.5)), 3, 3)
             p.setPen(QColor("#DCE1E8"))
             p.drawText(QRectF(pc * slot, h - bottom + 4, slot, bottom - 4),
-                       Qt.AlignHCenter | Qt.AlignTop, NOTE_NAMES[pc])
+                       Qt.AlignHCenter | Qt.AlignTop, pc_name(pc))
             if share >= 0.005:
                 p.setPen(QColor("#8D97A5"))
                 label = f"{share * 100:.0f}%"
@@ -162,7 +168,7 @@ class SummaryView(QWidget):
         self.used.setSortingEnabled(True)
         self.used.itemSelectionChanged.connect(self._on_select)
         self.used.setColumnWidth(0, 70)
-        self.used.setColumnWidth(1, 60)
+        self.used.setColumnWidth(1, 92)
         right.addWidget(title)
         right.addWidget(hint)
         right.addWidget(self.used, 1)
@@ -170,7 +176,7 @@ class SummaryView(QWidget):
 
     def clear(self) -> None:
         for value in self.fields.values():
-            value.setText("Not analyzed yet")
+            value.setText(tr("Not analyzed yet"))
         self.chart.set_data([0.0] * 12, None)
         self.chart_hint.setText("")
         self.used.clear()
@@ -180,41 +186,48 @@ class SummaryView(QWidget):
         all_notes = [n for t in r.tracks for n in t.notes]
 
         if r.key:
-            sure = {"high": "fairly sure", "medium": "somewhat sure", "low": "a rough guess"}[r.key.confidence]
-            text = f"{r.key.name} ({sure})"
+            text = f"{r.key.name} ({sureness(r.key.confidence)})"
             if r.key.alternative:
-                text += f", could also be {r.key.alternative}"
+                text += tr(", could also be {key}").format(key=r.key.alternative_name)
             self.fields["key"].setText(text)
         elif r.notes_requested:
-            self.fields["key"].setText("Not enough notes to tell")
+            self.fields["key"].setText(tr("Not enough notes to tell"))
         else:
-            self.fields["key"].setText("Turn on Find notes to estimate the key")
+            self.fields["key"].setText(tr("Turn on Find notes to estimate the key"))
 
-        self.fields["tempo"].setText(f"Around {r.tempo:.0f} BPM" if r.tempo else "No steady beat found")
+        if r.tempo:
+            text = tr("Around {bpm} BPM").format(bpm=f"{r.tempo:.0f}")
+            if r.meter and r.meter != 4:
+                text += tr(", {n} beats per bar").format(n=r.meter)
+            self.fields["tempo"].setText(text)
+        else:
+            self.fields["tempo"].setText(tr("No steady beat found"))
 
         if pitched:
             lo, hi = min(n.pitch for n in pitched), max(n.pitch for n in pitched)
-            self.fields["range"].setText(f"{note_name(lo)} to {note_name(hi)}")
+            self.fields["range"].setText(tr("{low} to {high}").format(low=note_name(lo), high=note_name(hi)))
         else:
-            self.fields["range"].setText("No notes")
+            self.fields["range"].setText(tr("No notes"))
 
         if r.tracks:
-            parts = ", ".join(f"{t.name} {len(t.notes)}" for t in r.tracks)
+            parts = ", ".join(f"{tr(t.name)} {len(t.notes)}" for t in r.tracks)
             total = len(all_notes)
             self.fields["notes"].setText(f"{total} ({parts})" if len(r.tracks) > 1 else str(total))
         else:
-            self.fields["notes"].setText("Note finding was off")
+            self.fields["notes"].setText(tr("Note finding was off"))
 
         if r.words_requested:
             words = sum(len(s.words) or len(s.text.split()) for s in r.segments)
-            lang = LANGUAGE_NAMES.get(r.language or "", (r.language or "unknown").upper())
-            sure = f", {r.language_probability * 100:.0f}% sure" if r.language_probability else ""
-            self.fields["words"].setText(f"{words} words in {len(r.segments)} lines. Language: {lang}{sure}")
+            lang = tr(LANGUAGE_NAMES.get(r.language or "", (r.language or "unknown").upper()))
+            sure = tr(", {n}% sure").format(n=f"{r.language_probability * 100:.0f}") if r.language_probability else ""
+            self.fields["words"].setText(
+                tr("{words} words in {lines} lines. Language: {lang}").format(words=words, lines=len(r.segments),
+                                                                              lang=lang) + sure)
         else:
-            self.fields["words"].setText("Transcription was off")
+            self.fields["words"].setText(tr("Transcription was off"))
 
         self.chart.set_data(pitch_class_weights(pitched), r.key)
-        self.chart_hint.setText("Brighter bars are notes in the estimated key." if r.key else "")
+        self.chart_hint.setText(tr("Brighter bars are notes in the estimated key.") if r.key else "")
 
         self.used.setSortingEnabled(False)
         self.used.clear()
@@ -308,8 +321,13 @@ class PartRow(QFrame):
 
     def refresh_name(self) -> None:
         count = len(self.track.notes)
-        suffix = "hits" if self.track.name == "Drums" else "notes"
-        self.name.setText(f"{self.track.name}  ({count} {suffix})" if count else f"{self.track.name}  (no notes)")
+        if not count:
+            what = tr("no notes")
+        elif self.track.name == "Drums":
+            what = tr_n(count, "{n} hit", "{n} hits")
+        else:
+            what = tr_n(count, "{n} note", "{n} notes")
+        self.name.setText(f"{tr(self.track.name)}  ({what})")
 
     def _on_mute(self, on: bool) -> None:
         self.track.muted = on
@@ -337,7 +355,7 @@ class NoteSpin(QSpinBox):
         return note_name(value)
 
     def valueFromText(self, text: str) -> int:  # noqa: N802
-        text = text.strip().upper().replace("♯", "#")
+        text = text.strip().upper().replace("♯", "#").replace("♭", "B")
         for pitch in range(self.minimum(), self.maximum() + 1):
             if note_name(pitch).upper() == text:
                 return pitch
@@ -365,13 +383,14 @@ class ScaleFilterBox(QWidget):
         row = QHBoxLayout()
         row.setSpacing(6)
         self.root = QComboBox()
-        for name in NOTE_NAMES:
-            self.root.addItem(name)
-        self.root.setMaximumWidth(64)
+        self.root.setProperty("i18n_skip_items", True)   # note names, set by refresh_names()
+        for pc in range(12):
+            self.root.addItem(pc_name(pc, absolute=True), pc)
+        self.root.setMaximumWidth(78)
         self.kind = QComboBox()
         for name, _ in SCALES:
-            self.kind.addItem(name)
-        self.kind.addItem(self.CUSTOM)
+            self.kind.addItem(name, name)
+        self.kind.addItem(self.CUSTOM, self.CUSTOM)
         self.kind.setToolTip("Show only the notes of a scale or chord. Or click the keys below to pick your own.")
         row.addWidget(self.root)
         row.addWidget(self.kind, 1)
@@ -388,8 +407,8 @@ class ScaleFilterBox(QWidget):
         for pc in range(12):
             b = QToolButton()
             b.setObjectName("KeyButton")
+            b.setProperty("i18n_skip", True)
             b.setCheckable(True)
-            b.setText(NOTE_NAMES[pc])
             b.setChecked(True)
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.toggled.connect(self._on_key)
@@ -415,6 +434,7 @@ class ScaleFilterBox(QWidget):
         lay.addLayout(row)
 
         self.key_btn = QPushButton("Use the detected key")
+        self.key_btn.setProperty("i18n_skip", True)      # its text includes the key, set in code
         self.key_btn.setEnabled(False)
         lay.addWidget(self.key_btn)
 
@@ -445,7 +465,18 @@ class ScaleFilterBox(QWidget):
         self.high.valueChanged.connect(self._emit)
         self.key_btn.clicked.connect(self._use_detected)
         self.reset_btn.clicked.connect(self.reset)
+        self.refresh_names()
         self._sync_enabled()
+
+    def refresh_names(self) -> None:
+        """Note names follow the chosen style (C D E or Do Re Mi) and language."""
+        for pc in range(12):
+            self.root.setItemText(pc, pc_name(pc, absolute=True))
+            self.keys[pc].setText(pc_name(pc))
+        # the spin boxes show note_name() text
+        for spin in (self.low, self.high):
+            spin.lineEdit().setText(spin.textFromValue(spin.value()))
+        self.set_detected_key(self._detected)
 
     # Reading and writing the state ---------------------------------------------------
 
@@ -456,12 +487,10 @@ class ScaleFilterBox(QWidget):
     def current(self) -> NoteFilter:
         classes = self._classes()
         low, high = self.low.value(), self.high.value()
-        label = ""
-        if classes is not None:
-            kind = self.kind.currentText()
-            label = f"{NOTE_NAMES[self.root.currentIndex()]} {kind.lower()}" if kind != self.CUSTOM else "the chosen notes"
-        return NoteFilter(classes, bool(self.mode.currentData()),
-                          0 if low <= 12 else low, 127 if high >= 120 else high, label)
+        kind = self.kind.currentData()
+        named = classes is not None and kind not in (self.CUSTOM, SCALES[0][0])
+        return NoteFilter(classes, bool(self.mode.currentData()), 0 if low <= 12 else low, 127 if high >= 120 else high,
+                          self.root.currentIndex() if named else None, kind if named else "")
 
     def _set_keys(self, classes: frozenset[int] | None) -> None:
         for pc, b in enumerate(self.keys):
@@ -472,7 +501,7 @@ class ScaleFilterBox(QWidget):
     def _sync_enabled(self) -> None:
         scaled = self._classes() is not None
         self.mode.setEnabled(scaled)
-        self.root.setEnabled(self.kind.currentText() not in (SCALES[0][0], self.CUSTOM))
+        self.root.setEnabled(self.kind.currentData() not in (SCALES[0][0], self.CUSTOM))
 
     def _emit(self) -> None:
         if not self._busy:
@@ -482,7 +511,7 @@ class ScaleFilterBox(QWidget):
     def _on_scale(self) -> None:
         if self._busy:
             return
-        name = self.kind.currentText()
+        name = self.kind.currentData()
         if name == self.CUSTOM:
             self._sync_enabled()
             self.changed.emit(self.current())
@@ -510,18 +539,21 @@ class ScaleFilterBox(QWidget):
         """key: a KeyEstimate or None."""
         self._detected = key
         self.key_btn.setEnabled(key is not None)
-        self.key_btn.setText(f"Use the detected key ({key.name})" if key else "Use the detected key")
+        self.key_btn.setText(tr("Use the detected key ({key})").format(key=key.name) if key
+                             else tr("Use the detected key"))
 
-    def _use_detected(self) -> None:
-        if not self._detected:
-            return
+    def use_key(self, tonic: int, mode: str) -> None:
         names = [n for n, _ in SCALES]
         self._busy = True
-        self.root.setCurrentIndex(self._detected.tonic)
-        self.kind.setCurrentIndex(names.index("Major" if self._detected.mode == "major" else "Natural minor"))
-        self._set_keys(scale_classes(self._detected.tonic, dict(SCALES)[self.kind.currentText()]))
+        self.root.setCurrentIndex(tonic)
+        self.kind.setCurrentIndex(names.index("Major" if mode == "major" else "Natural minor"))
+        self._set_keys(scale_classes(tonic, dict(SCALES)[self.kind.currentData()]))
         self._busy = False
         self._emit()
+
+    def _use_detected(self) -> None:
+        if self._detected:
+            self.use_key(self._detected.tonic, self._detected.mode)
 
     def reset(self) -> None:
         self._busy = True
@@ -602,7 +634,7 @@ class SelectionView(QWidget):
         self.used.setAlternatingRowColors(True)
         self.used.setSortingEnabled(True)
         self.used.setColumnWidth(0, 60)
-        self.used.setColumnWidth(1, 50)
+        self.used.setColumnWidth(1, 92)
         self.used.itemSelectionChanged.connect(self._on_note_select)
         notes_col.addWidget(title)
         notes_col.addWidget(self.used, 1)
@@ -646,7 +678,8 @@ class SelectionView(QWidget):
                     break
         self.used.blockSignals(False)
 
-    def show_span(self, a: float, b: float, tracks, flt: NoteFilter, beats, segments) -> None:
+    def show_span(self, a: float, b: float, tracks, flt: NoteFilter, beats, segments, meter: int = 4,
+                  lane=None) -> None:
         """Fills in the details for [a, b]. `tracks` are the parts, only visible ones count."""
         self.empty.hide()
         self.body.show()
@@ -658,11 +691,12 @@ class SelectionView(QWidget):
         pitched = [n for t, notes in shown if t.name != "Drums" for n in notes]
         drums = [n for t, notes in shown if t.name == "Drums" for n in notes]
 
-        self.fields["span"].setText(f"{format_time(a, 2)} to {format_time(b, 2)}")
+        self.fields["span"].setText(tr("{low} to {high}").format(low=format_time(a, 2), high=format_time(b, 2)))
         text = f"{length:.2f} s"
         if period:
             beat_count = length / period
-            text += f", about {beat_count:.1f} beats ({beat_count / 4:.1f} bars)"
+            text += tr(", about {beats} beats ({bars} bars)").format(beats=f"{beat_count:.1f}",
+                                                                     bars=f"{beat_count / max(1, meter):.1f}")
         self.fields["length"].setText(text)
 
         weights = [0.0] * 12
@@ -670,22 +704,21 @@ class SelectionView(QWidget):
             weights[n.pitch % 12] += _clipped_seconds(n, a, b) * (0.5 + n.velocity)
         key = estimate_key(weights) if pitched else None
         if key:
-            sure = {"high": "fairly sure", "medium": "somewhat sure", "low": "a rough guess"}[key.confidence]
-            self.fields["key"].setText(f"{key.name} ({sure})")
+            self.fields["key"].setText(f"{key.name} ({sureness(key.confidence)})")
         else:
-            self.fields["key"].setText("Not enough notes to tell")
+            self.fields["key"].setText(tr("Not enough notes to tell"))
         self.chart.set_data(weights, key)
 
         if pitched:
             lo, hi = min(n.pitch for n in pitched), max(n.pitch for n in pitched)
-            self.fields["range"].setText(f"{note_name(lo)} to {note_name(hi)}")
+            self.fields["range"].setText(tr("{low} to {high}").format(low=note_name(lo), high=note_name(hi)))
         else:
-            self.fields["range"].setText("No notes")
+            self.fields["range"].setText(tr("No notes"))
 
-        parts = [f"{t.name} {len(notes)}" for t, notes in shown if notes]
+        parts = [f"{tr(t.name)} {len(notes)}" for t, notes in shown if notes]
         total = sum(len(notes) for _, notes in shown)
         self.fields["notes"].setText(f"{total}" + (f" ({', '.join(parts)})" if len(parts) > 1 else "")
-                                     if total else "None")
+                                     if total else tr("None"))
 
         clipped: dict[int, list] = {}  # pitch -> [times played, seconds inside the span]
         for n in pitched:
@@ -699,15 +732,17 @@ class SelectionView(QWidget):
                 name = note_label(n.pitch, "Drums")
                 kinds[name] = kinds.get(name, 0) + 1
             drum_text = ", ".join(f"{k} {v}" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]))
-            self.fields["busiest"].setText((f"{note_name(busiest[0])}. " if busiest else "") + f"Drums: {drum_text}")
+            self.fields["busiest"].setText((f"{note_name(busiest[0])}. " if busiest else "")
+                                           + tr("Drums: {list}").format(list=drum_text))
         else:
-            self.fields["busiest"].setText(f"{note_name(busiest[0])}, {busiest[1][0]} times" if busiest else "-")
+            self.fields["busiest"].setText(
+                f"{note_name(busiest[0])}, " + tr_n(busiest[1][0], "{n} time", "{n} times") if busiest else "-")
 
         words = [w.text for s in segments for w in (s.words or []) if a <= w.start < b]
         if not words:
             words = [s.text for s in segments if s.text and s.start < b and s.end > a]
         text = " ".join(words)
-        self.fields["words"].setText((text[:300] + "...") if len(text) > 300 else (text or "None"))
+        self.fields["words"].setText((text[:300] + "...") if len(text) > 300 else (text or tr("None")))
 
         self.used.setSortingEnabled(False)
         self.used.clear()
@@ -726,8 +761,12 @@ class SelectionView(QWidget):
         self.chords.clear()
         step = period * 2 if period else 1.5
         rows = []
-        for start, _end, name in guess_chords(pitched, a, b, step):
-            item = QTreeWidgetItem([format_time(start, 1), name])
+        if lane:
+            found = [(max(s, a), e, c) for s, e, c in lane if e > a and s < b]
+        else:
+            found = guess_chords(pitched, a, b, step)
+        for start, _end, chord in found:
+            item = QTreeWidgetItem([format_time(start, 1), chord.name() if chord else "?"])
             item.setData(0, DATA_ROLE, start)
             rows.append(item)
         self.chords.addTopLevelItems(rows)
