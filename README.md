@@ -14,7 +14,7 @@ Open any audio or video file and Audio Scribe will:
 - Let you fix, move, and add notes (after you press Edit), then export the changed notes
 - Play the notes back on a piano, strings, guitars, accordion, drums, and more
 
-New in 1.2:
+New in 2.0:
 
 - **Chords tab** with ready-made chords and progressions you can drag onto the piano roll, voicings, voice leading, patterns, next-chord ideas, substitutes, key changes, a circle of fifths, and a sketch pad
 - **Download from YouTube** as MP3, M4A, Opus, FLAC, or WAV
