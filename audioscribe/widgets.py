@@ -262,10 +262,11 @@ class SummaryView(QWidget):
 
 
 class PartRow(QFrame):
-    """One part of the music in the Parts list: name, Mute, Solo, and its instrument."""
+    """One part of the music in the Parts list: name, Mute, Solo, volume, and its instrument."""
 
     changed = Signal()
     instrumentPicked = Signal(str)
+    mixChanged = Signal(object)        # the track, after its volume changed
 
     def __init__(self, track, parent=None):
         super().__init__(parent)
@@ -313,6 +314,25 @@ class PartRow(QFrame):
         row.addWidget(label)
         row.addWidget(self.combo, 1)
         lay.addLayout(row)
+
+        from .mixer_view import VolumeSlider, db_text
+        self._db_text = db_text
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        label = QLabel("Volume")
+        label.setObjectName("Hint")
+        self.volume = VolumeSlider()
+        self.volume.set_db(track.volume_db)
+        self.db_label = QLabel(db_text(track.volume_db))
+        self.db_label.setObjectName("Hint")
+        self.db_label.setProperty("i18n_skip", True)
+        self.db_label.setMinimumWidth(56)
+        self.db_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row.addWidget(label)
+        row.addWidget(self.volume, 1)
+        row.addWidget(self.db_label)
+        lay.addLayout(row)
+        self.volume.dbChanged.connect(self._on_volume)
         self.refresh_name()
 
         self.mute.toggled.connect(self._on_mute)
@@ -328,6 +348,21 @@ class PartRow(QFrame):
         else:
             what = tr_n(count, "{n} note", "{n} notes")
         self.name.setText(f"{tr(self.track.name)}  ({what})")
+
+    def sync(self) -> None:
+        """Shows the track's values again after they were changed somewhere else."""
+        t = self.track
+        for b, v in ((self.mute, t.muted), (self.solo, t.solo)):
+            b.blockSignals(True)
+            b.setChecked(v)
+            b.blockSignals(False)
+        self.volume.set_db(t.volume_db)
+        self.db_label.setText(self._db_text(t.volume_db))
+
+    def _on_volume(self, db: float) -> None:
+        self.track.volume_db = db
+        self.db_label.setText(self._db_text(db))
+        self.mixChanged.emit(self.track)
 
     def _on_mute(self, on: bool) -> None:
         self.track.muted = on

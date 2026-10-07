@@ -6,11 +6,26 @@ Open any audio or video file and Audio Scribe will:
 - Find the notes and show them on a piano roll timeline, like the Key Editor in Cubase
 - Find the chords, the key, and the tempo, and show the chords in a lane above the notes
 - Find the drum hits (kick, snare, hi-hat) when you split a song into stems
-- Optionally split a song into vocals, bass, drums, and other first, for cleaner results
-- Let you show only one scale, mute or solo any part, and hear the result
+- Optionally split a song into vocals, bass, drums, and other first (or also piano and guitar), for cleaner results
+- Let you show only one scale, mute or solo any part, set its volume and pan, and hear the result
+- Show every part as a track with its waveform, with a mixer, like a DAW, and let you record yourself along with the song
 - Let you drag a selection over any stretch of the song to see it in detail and loop it
 - Let you fix, move, and add notes (after you press Edit), then export the changed notes
 - Play the notes back on a piano, strings, guitars, accordion, drums, and more
+
+New in 2.1.0:
+
+- **Live mixer:** a volume fader, pan, mute, solo and a level meter for every part, in the new **Mixer** tab, on each track, and in the Parts list. Changes are heard right away while the song plays
+- **Tracks view:** every part as a lane with its waveform and notes, like the arrangement window of a DAW (F2)
+- **6 part split:** takes piano and guitar out of "other" too
+- **Record a take** from the microphone while the song plays. It goes on its own track
+- **Bounce:** save the mix, or each part in its own file, as WAV or FLAC, with your volumes and pans
+- **A better note editor:** draw, erase, split and glue tools, copy, paste and duplicate, quantize, a strength (velocity) lane, and editing one part at a time
+- **Fixed:** opening Sheet music no longer closes the app on some Linux systems
+
+New in 2.0.1:
+
+- **Updates itself.** It checks GitHub for a newer version, asks you first, then downloads it, checks its signature, and restarts on the new version
 
 New in 2.0:
 
@@ -22,10 +37,6 @@ New in 2.0:
 - **Projects:** save everything and open it again later without analyzing again
 - **Slow down** without changing the pitch, a **click track**, **tap tempo**, and a beat grid you can fix by hand
 - **Cleanup tools** for stray notes, **record from your microphone**, **drag MIDI** straight into Reaper or any DAW, and **lyrics with chords** export
-
-New in 2.0.1:
-
-- **Updates itself.** It checks GitHub for a newer version, asks you first, then downloads it, checks its signature, and restarts on the new version
 
 It runs on your own computer. Your audio is never uploaded anywhere. It only goes online to download a model the first time you use it, to download from YouTube when you ask it to, and to check for a new version (you can turn that off).
 
@@ -118,6 +129,7 @@ The first run of each Whisper model downloads it, so that run takes longer. Afte
 
 **Stems**
 - **Split into stems first:** separates the song before analyzing.
+- **Split into:** **4 parts** (vocals, bass, drums, and other) or **6 parts**, which also takes **piano** and **guitar** out of other. 6 parts is a little slower, and the first time it downloads another model (about 50 MB). Strings like violins, and other instruments, stay in Other: no separation model can split them out on their own yet.
 - **Find notes in:** which stems to look for notes in. For Drums it finds drum hits (kick, snare, and hi-hat) instead of pitches.
 
 **Run on:** CPU or NVIDIA GPU. The GPU choice is greyed out if no NVIDIA GPU with CUDA is found. If the GPU fails for Whisper, it falls back to the CPU on its own.
@@ -160,6 +172,8 @@ Flats are used where they belong, so F major shows Bb (or Sib) rather than A#.
 | Zoom to the selected span, and back | Z |
 | Loop the selected span on or off | L |
 | Edit mode on or off | E |
+| Piano roll or Tracks view | F1 and F2 |
+| Record a take along with the song | R |
 | Tap tempo | T |
 | Clear the span or selection | Esc |
 | Undo and redo (Edit mode) | Ctrl+Z and Ctrl+Y |
@@ -172,10 +186,11 @@ Flats are used where they belong, so F major shows Bb (or Sib) rather than A#.
 
 After an analysis, the **Parts and sound** tab at the top of the left panel has these sections.
 
-**Parts.** Each part (Vocals, Bass, Other, Drums, or Full mix if you did not split into stems) has an **M** button and an **S** button.
+**Parts.** Each part (Vocals, Piano, Guitar, Bass, Other, Drums, or Full mix if you did not split into stems, and any takes you recorded) has an **M** button, an **S** button, and a **Volume** slider.
 
 - **M** (mute) hides the part's notes and silences it. Mute the vocals and you hear only the music.
 - **S** (solo) shows and plays only the soloed parts.
+- **Volume** turns the part up or down while it plays. Double-click it to put it back to 0 dB.
 - **Sound** is the instrument that part's notes use when they are played back: Soft piano (the default), Bright piano, Electric piano, Violin, Strings (section), Cello, Acoustic guitar, Electric guitar, Bass guitar, Harp, Accordion, Organ, Flute, Clarinet, Trumpet, Choir (ooh), Warm pad, Music box, and Drum kit. Drums always use the drum kit. Your choices are remembered for next time.
 
 What you hide is hidden everywhere: the piano roll, the Notes tab, the Summary and Selection tabs, playback, and the exports.
@@ -195,8 +210,34 @@ What you hide is hidden everywhere: the piano roll, the Notes tab, the Summary a
 - **Recording and notes** plays both together. **Notes level** sets how loud the instruments are, and **Add room sound** adds a little reverb.
 - **Click track** adds a metronome on the beat grid, louder on the first beat of each bar. **Click level** sets its volume.
 
-The first time you change what is muted or which instrument is used, the app builds the new sound in the background while the old one keeps playing, then switches over at the same spot.
+Volume, pan, mute, solo, the Play menu, the notes level and the click are mixed live, so you hear a change about a tenth of a second later, while the song keeps playing. When the notes are played on instruments, each part's notes are prepared in the background the first time (and again after you edit them or change the instrument), while the old sound keeps playing.
 
+### The mixer
+
+The **Mixer** tab under the piano roll has a channel strip for every part, like a mixing desk:
+
+- a **fader** for the volume (0 dB is the part as it was recorded; up to +6 dB, down to silent) and a **level meter** next to it
+- **pan**, from left to right (double-click to centre)
+- **M** and **S** for mute and solo
+
+The **Master** strip shows the level of everything together. The volume slider in the bottom bar is the master volume. The same volume, pan, mute and solo are also on each track in the Tracks view and in the Parts list, and they always match.
+
+### The Tracks view
+
+Press **Tracks** above the piano roll (or F2) to see every part as a lane with its waveform and its notes, like the arrangement window of a DAW. **Piano roll** (or F1) goes back.
+
+- Each track has its name, **M** and **S**, a **Vol** slider, a **Pan** slider, and a level meter
+- Click a lane to move the playhead, or drag across it to select a span (the same span as in the piano roll, so Zoom, Loop and the Selection tab work with it)
+- Ctrl + scroll zooms, Shift + scroll scrolls sideways, **Fit** shows the whole song
+- Double-click a track to edit its notes in the piano roll
+
+### Recording a take along with the song
+
+Press **● Rec** in the bottom bar (or R) to record from your microphone while the song plays from where the playhead is. Press it again to stop. The take goes on a new track (Take 1, Take 2 ...), so you can hear it together with the song, mute it, and set its volume and pan like any other part. It is saved in the project.
+
+Right-click a take in the Tracks view to **find the notes** in it (so you can see what you sang or played on the piano roll), rename it, or remove it. If it is a little early or late, hold **Alt** and drag it left or right to line it up; its notes move with it.
+
+The microphone recorder in the File section is still there for recording a new song on its own.
 ### Selecting a span, zooming, and looping
 
 Drag across the piano roll to select a span of time. It is shaded, and its length shows at the top. Drag either edge to adjust it. The toolbar above the piano roll then lets you:
@@ -212,15 +253,26 @@ The **Selection** tab shows details for the span: its length in seconds, beats, 
 
 Notes cannot be changed until you press **Edit notes** (or E), so nothing moves by accident. The piano roll gets an amber border and a small EDIT badge so you can tell it is on.
 
+In Edit mode a second row of buttons appears with the tools and options:
+
+- **Part** is the part you are editing. New, drawn and pasted notes go into it. With **Only this part** on (the default), the other parts are dimmed and can't be changed by accident.
+- **Select** (1) moves, resizes and selects notes, **Draw** (2) adds a note where you click (drag to make it longer), **Erase** (3) removes the notes you click or drag over, **Split** (4) cuts a note in two where you click, and **Glue** (5) joins a note to the next note of the same pitch.
+- **Strength lane** shows how loud each note is as a bar under the piano roll. Drag up and down over the bars to change them (only the selected notes, if any are selected).
+- **Quantize** lines the selected notes up with the grid (the **Snap** setting, or half beats when Snap is off).
+
 | Action | How |
 |---|---|
 | Move a note in time or pitch | Drag it |
 | Make it longer or shorter | Drag its right edge |
-| Add a note | Double-click empty space. It goes into the part chosen in **Add to** |
-| Delete notes | Select them, then press Delete |
+| Add a note | Double-click empty space, or use the Draw tool. It goes into the part chosen in **Part** |
+| Delete notes | Select them, then press Delete, or use the Erase tool |
 | Select several | Drag a box on empty space, or Ctrl or Shift + click. Ctrl+A selects all |
+| Copy, cut, paste | Ctrl+C, Ctrl+X, Ctrl+V. Pasting puts the notes at the playhead |
+| Duplicate | Ctrl+D puts a copy right after the selected notes |
+| Quantize | Q |
 | Nudge selected notes | Arrow keys (up and down are a semitone, left and right are a small step, or one snap step). Hold Shift for an octave or a bigger step |
-| Change how loud | Select notes, then change the **%** box |
+| Change how loud | Select notes, then change the **%** box, or drag their bars in the Strength lane |
+| More | Right-click for cut, copy, paste, duplicate, quantize, up or down an octave, split, glue, and select every note of one pitch |
 | Select a span while editing | Hold Shift and drag on empty space |
 | Undo and redo | Ctrl+Z and Ctrl+Y, or the Undo and Redo buttons |
 | Put everything back | **Revert all** |
@@ -251,7 +303,7 @@ The **Chords** tab at the bottom is a chord workshop, inspired by tools like Sca
 - **Pattern:** how the chord is played: Block chord, pulses, arpeggios up, down, or both, broken chord, Alberti bass, strum, bass and chord, waltz, or bass lines (root notes, root and fifth, or walking).
 - **Length:** 1 beat up to 4 bars. **Hear with:** the sound of the part, or any instrument.
 
-Click a chord to hear it. To put chords into the song, turn on **Edit notes**, then **drag a chord onto the piano roll**. A ghost shows where it will land, and it snaps to the grid. **Insert at playhead** does the same at the playhead. Chords go into the part chosen in **Add to**.
+Click a chord to hear it. To put chords into the song, turn on **Edit notes**, then **drag a chord onto the piano roll**. A ghost shows where it will land, and it snaps to the grid. **Insert at playhead** does the same at the playhead. Chords go into the part chosen in **Part**.
 
 **On the right** are these pages:
 
@@ -286,7 +338,7 @@ Machine translation of lyrics is a good starting point but not poetry, especiall
 
 ### Projects
 
-**Save project...** (Ctrl+S) saves everything in one `.ascribe` file: the audio (and the stems), the words and any translation, the notes with your edits, the chords, your beat grid fixes, the sketch pad, and the original notes the app found (so Revert all still works). Open it again with Ctrl+O or by dropping it on the window, and everything is back with nothing to analyze again.
+**Save project...** (Ctrl+S) saves everything in one `.ascribe` file: the audio (and the stems and takes), each part's volume and pan, the words and any translation, the notes with your edits, the chords, your beat grid fixes, the sketch pad, and the original notes the app found (so Revert all still works). Open it again with Ctrl+O or by dropping it on the window, and everything is back with nothing to analyze again.
 
 A project is a zip file with FLAC audio inside, about half the size of the WAV files. When opening one, the app checks every part of it and refuses anything unexpected, so a damaged or tampered file can't write anywhere or run anything.
 
@@ -329,7 +381,7 @@ The Export button at the top right has:
 - **Notes as spreadsheet (.csv)**
 - **Sheet music (PDF, print, MusicXML)**
 - **Stems as WAV files**
-- **Recording or notes as WAV (what you hear)** saves exactly what the Play menu is playing right now
+- **Bounce: mix or parts as WAV or FLAC (what you hear)** saves the sound with your volumes, pans, mutes and solos, and the Play setting. Save the whole mix in one file, or **each part in its own file** to carry on in another DAW (each part keeps its volume and pan, but not the master volume). It can save just the selected span, and as WAV or FLAC
 - **Project** (everything, to open again later)
 
 What you export matches what you see. Muted parts are left out, the scale filter applies, and any notes you edited are the edited ones.
@@ -476,12 +528,17 @@ audio-scribe/
     audio.py                 reading audio and video files
     music.py                 note names (letters and Do Re Mi), scales, key estimation
     synth.py                 the instrument sounds
-    mixer.py                 builds the audio that plays (recording, notes, click, or both)
+    playback.py              the live audio engine: mixes every part while it plays, speed, loop
+    mixer.py                 renders each part's notes on its instrument, and the click track
+    mixer_view.py            the Mixer tab (faders, pan, meters)
+    timeline.py              the Tracks view
+    bounce.py                saving what you hear as WAV or FLAC
     exporters.py             txt, srt, lrc, chord sheets, ChordPro, MIDI, CSV
     notation.py              turns notes into MusicXML for sheet music
     sheet_view.py            the sheet music window (preview, PDF, print)
+    engrave.py               engraves sheet music with Verovio, in its own process
     project.py               saving and opening .ascribe projects
-    recorder.py              recording from the microphone
+    recorder.py              recording from the microphone, and takes along with the song
     youtube.py               YouTube download
     translate.py             lyrics translation
     i18n.py, i18n_ro.py      the interface languages and the Romanian text
@@ -521,7 +578,7 @@ It asks for a passphrase (use one), saves the private key to `~/.config/audio-sc
    git add -A
    .venv/bin/python tools/release.py sign --notes "What changed, in a sentence or two"
    git add update
-   git commit -m "Audio Scribe 2.0.2"
+   git commit -m "Audio Scribe 2.1.0"
    git push
    ```
 

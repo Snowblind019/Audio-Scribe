@@ -11,7 +11,7 @@ from .i18n import tr
 from .music import note_name
 
 # General MIDI programs (0-based) used when a track has no instrument chosen.
-_PROGRAMS = {"Vocals": 53, "Bass": 33, "Other": 0, "Full mix": 0}
+_PROGRAMS = {"Vocals": 53, "Bass": 33, "Other": 0, "Full mix": 0, "Piano": 0, "Guitar": 24}
 
 
 def _srt_time(t: float) -> str:

@@ -8,27 +8,28 @@ import html
 import logging
 import shutil
 import tempfile
+import threading
 import time
 import traceback
-import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QSettings, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QFontDatabase, QKeySequence, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QFileDialog,
                                QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-                               QSlider, QSpinBox, QSplitter, QStyle, QTabWidget, QToolButton,
+                               QSlider, QSpinBox, QSplitter, QStackedWidget, QStyle, QTabWidget, QToolButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import APP_NAME, exporters, i18n, mixer, project, synth
+from . import APP_NAME, audio, exporters, i18n, mixer, playback, project, synth
 from .app import cache_dir
-from .engine import (LANGUAGE_NAMES, LANGUAGES, STEM_ORDER, WHISPER_MODELS, Analyzer, Cancelled, Note,
+from .engine import (LANGUAGE_NAMES, LANGUAGES, SIX_ONLY, STEM_ORDER, WHISPER_MODELS, Analyzer, Cancelled, Note,
                      Options, Result, cuda_available, friendly_error, remove_dir, stems_available)
 from .i18n import tr, tr_n
 from .music import NoteFilter, estimate_key, format_time, note_label, note_name, pitch_class_weights, set_naming
+from .mixer_view import MixerPanel
 from .piano_roll import PianoRoll
+from .timeline import TracksView
 from .widgets import (DATA_ROLE, SORT_ROLE, ElidedLabel, PartRow, ScaleFilterBox, SelectionView, SortItem,
                       SummaryView, swatch_icon)
 from .update_ui import UpdateMixin
@@ -39,6 +40,7 @@ log = logging.getLogger(__name__)
 OPEN_FILTER = ("Audio, video and projects (*.mp3 *.wav *.flac *.ogg *.oga *.opus *.m4a *.aac *.wma *.aif "
                "*.aiff *.alac *.mp4 *.m4v *.mkv *.webm *.mov *.avi *.ascribe);;Audio Scribe projects (*.ascribe);;"
                "All files (*)")
+TAKE_OFFSETS = "~take offsets"     # key in an undo snapshot (part uids never look like this)
 SNAP_CHOICES = [("Snap: off", 0), ("Snap: beat", 1), ("Snap: 1/2 beat", 2), ("Snap: 1/4 beat", 4)]
 UNDO_LIMIT = 60
 
@@ -95,31 +97,91 @@ class AnalyzeThread(QThread):
             self.failed.emit(friendly_error(exc), traceback.format_exc())
 
 
-class RenderThread(QThread):
-    """Builds the audio the player plays (muted parts left out, notes played on instruments)."""
+class LaneRenderer(QThread):
+    """Renders the parts' notes on their instruments (and the click track) into WAV files the
+    live mixer plays, one at a time, in the background. A newer request for the same part
+    replaces an older one, and stops it if it is already rendering."""
 
+    rendered = Signal(str, str, str)    # uid, signature, file path
     progressed = Signal(float)
-    rendered = Signal(str, str)   # signature, file path
     failed = Signal(str, str)
 
-    def __init__(self, spec: mixer.MixSpec, path: Path, signature: str, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.spec, self.path, self.signature = spec, path, signature
-        self._stop = False
+        self._cond = threading.Condition()
+        self._jobs: dict[str, tuple[str, object, Path]] = {}     # uid -> (signature, job, file)
+        self._want: dict[str, str] = {}
+        self._quit = False
+
+    def request(self, job, signature: str, path: Path) -> None:
+        with self._cond:
+            self._jobs[job.uid] = (signature, job, path)
+            self._want[job.uid] = signature
+            self._cond.notify()
+
+    def forget_all(self) -> None:
+        with self._cond:
+            self._jobs.clear()
+            self._want.clear()
+
+    def busy(self) -> bool:
+        with self._cond:
+            return bool(self._jobs) or self._current is not None
 
     def stop(self) -> None:
-        self._stop = True
+        with self._cond:
+            self._quit = True
+            self._cond.notify()
+
+    _current = None
+
+    def run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._jobs and not self._quit:
+                    self._cond.wait()
+                if self._quit:
+                    return
+                uid = next(iter(self._jobs))
+                sig, job, path = self._jobs.pop(uid)
+                self._current = uid
+
+            def stale() -> bool:
+                return self._quit or self._want.get(uid) != sig
+
+            try:
+                mixer.render(job, path, report=self.progressed.emit, should_stop=stale)
+                if not stale():
+                    self.rendered.emit(uid, sig, str(path))
+            except mixer.Stopped:
+                _remove_file(path)
+            except Exception as exc:
+                log.exception("Building the sound failed")
+                _remove_file(path)
+                self.failed.emit(str(exc), traceback.format_exc())
+            finally:
+                with self._cond:
+                    self._current = None
+
+
+class DecodeThread(QThread):
+    """Turns the opened file into a WAV the player can read, before any analysis."""
+
+    decoded = Signal(str, str, float)       # source path, wav path, duration
+    failed = Signal(str, str)
+
+    def __init__(self, source: Path, out: Path, parent=None):
+        super().__init__(parent)
+        self.source, self.out = source, out
 
     def run(self) -> None:
         try:
-            mixer.render_mix(self.spec, self.path, report=self.progressed.emit, should_stop=lambda: self._stop)
-            self.rendered.emit(self.signature, str(self.path))
-        except mixer.Stopped:
-            Path(self.path).unlink(missing_ok=True)
+            data = audio.decode(self.source, playback.SR, 2)
+            audio.write_wav(self.out, data, playback.SR)
+            self.decoded.emit(str(self.source), str(self.out), data.shape[1] / playback.SR)
         except Exception as exc:
-            log.exception("Building the sound failed")
-            Path(self.path).unlink(missing_ok=True)
-            self.failed.emit(str(exc), traceback.format_exc())
+            log.warning("Could not prepare the file for playback: %s", exc)
+            self.failed.emit(str(self.source), str(exc))
 
 
 def show_message(parent, icon, text: str, details: str | None = None, informative: str | None = None) -> None:
@@ -134,63 +196,41 @@ def show_message(parent, icon, text: str, details: str | None = None, informativ
 
 
 class Auditioner:
-    """Plays a single note, or a short phrase, so edits and instruments can be heard
-    right away. Uses its own player so the main one is left alone."""
+    """Plays a single note, or a short phrase, so edits and instruments can be heard right
+    away. It plays through the live mixer, on top of the song if it is playing."""
 
     def __init__(self, window: "MainWindow"):
         self.window = window
-        self.player = QMediaPlayer(window)
-        self.output = QAudioOutput(window)
-        self.player.setAudioOutput(self.output)
         self.bank = synth.Bank()
+        self._cache: dict[tuple, object] = {}
 
-    def _folder(self) -> Path | None:
-        r = self.window.result
-        if not r:
-            return None
-        folder = Path(r.work_dir) / "audition"
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder
-
-    def _play(self, path: Path) -> None:
-        self.output.setVolume(self.window.volume.value() / 100.0)
-        self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.player.play()
+    def _play(self, sound) -> None:
+        self.window.player.audition(sound)
 
     def note(self, key: str, pitch: int, velocity: float = 0.75) -> None:
         try:
-            folder = self._folder()
-            if folder is None:
-                return
-            path = folder / f"{key}-{pitch}-{int(velocity * 4)}.wav"
-            if not path.exists():
-                mixer.write_stereo(path, synth.render_single(key, pitch, velocity, bank=self.bank))
-            self._play(path)
+            k = ("note", key, pitch, int(velocity * 4))
+            if k not in self._cache:
+                if len(self._cache) > 256:
+                    self._cache.clear()
+                self._cache[k] = synth.render_single(key, pitch, velocity, bank=self.bank)
+            self._play(self._cache[k])
         except Exception:
             log.exception("Could not play a note")
 
     def rows(self, key: str, rows) -> None:
         """Play any list of (start, end, pitch, strength), for example chords from the Chords tab."""
         try:
-            folder = self._folder() or (cache_dir() / "audition")
-            folder.mkdir(parents=True, exist_ok=True)
-            self.window._audition_n += 1
-            path = folder / f"chords-{self.window._audition_n % 4}.wav"
-            mixer.write_stereo(path, synth.render_preview(key, list(rows), bank=self.bank))
-            self._play(path)
+            self._play(synth.render_preview(key, list(rows), bank=self.bank))
         except Exception:
             log.exception("Could not play the chords")
 
     def phrase(self, key: str) -> None:
         try:
-            folder = self._folder()
-            if folder is None:
-                return
-            path = folder / f"preview-{key}.wav"
-            if not path.exists():
-                mixer.write_stereo(path, synth.render_preview(key, bank=self.bank))
-            self._play(path)
+            k = ("phrase", key)
+            if k not in self._cache:
+                self._cache[k] = synth.render_preview(key, bank=self.bank)
+            self._play(self._cache[k])
         except Exception:
             log.exception("Could not play the instrument preview")
 
@@ -210,8 +250,6 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.result: Result | None = None
         self.thread: AnalyzeThread | None = None
         self._work_dir: Path | None = None
-        self._pending_seek: int | None = None
-        self._resume_after_load = False
         self._slider_held = False
         self._seg_starts: list[float] = []
         self._current_seg = -1
@@ -225,11 +263,13 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._notes_dirty = False
         self._last_strength_push = 0.0
 
-        self.render_thread: RenderThread | None = None
-        self._render_pending = False
-        self._loaded_sig = "plain"
-        self._want_sig = "plain"
-        self._mix_cache: dict[str, str] = {}
+        self._decoders: set[DecodeThread] = set()
+        self._clips: dict[tuple, playback.Clip] = {}     # recordings the mixer reads, by (file, start)
+        self._notes_clips: dict[str, playback.Clip] = {}  # each part's notes on its instrument, by part uid
+        self._lane_files: dict[str, str] = {}             # rendered file per signature
+        self._lane_want: dict[str, str] = {}              # signature each part should sound like
+        self._lane_loaded: dict[str, str] = {}            # signature each part sounds like now
+        self._lane_serial = 0
         self._edit_hint_shown = False
         self._edit_count = 0     # goes up with every change to the notes
         self._saved_count = 0    # the value of _edit_count when the notes were last exported
@@ -283,7 +323,21 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.roll.editStarted.connect(self._on_edit_started)
         self.roll.notesEdited.connect(self._on_notes_edited)
         self.roll.auditionRequested.connect(self._on_audition)
-        self.splitter.addWidget(self.roll)
+        self.roll.toolChanged.connect(self._set_tool)
+        self.roll.status.connect(self.status_text_set)
+        self.tracks_view = TracksView()
+        self.tracks_view.seekRequested.connect(self.seek)
+        self.tracks_view.spanChanged.connect(self._on_tracks_span)
+        self.tracks_view.trackActivated.connect(self._edit_track_in_roll)
+        self.tracks_view.mixChanged.connect(self._on_track_mix)
+        self.tracks_view.partsChanged.connect(lambda _t: self._on_parts_changed())
+        self.tracks_view.takeMenuRequested.connect(self._take_menu)
+        self.tracks_view.takeMoved.connect(self._on_take_moved)
+        self.tracks_view.canvas.snap = lambda t: self.roll.snap_time(t)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.roll)
+        self.view_stack.addWidget(self.tracks_view)
+        self.splitter.addWidget(self.view_stack)
         self.splitter.addWidget(self._build_tabs())
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
@@ -422,14 +476,25 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         lay.addWidget(box)
 
         # Stems
-        hint = ("Separates vocals, bass, drums, and the rest before analyzing. Slower, "
-                "but gives much cleaner words and notes on full songs.")
+        hint = ("Separates vocals, bass, drums, and the rest (and with 6 parts also piano and guitar) "
+                "before analyzing. Slower, but gives much cleaner words and notes on full songs. "
+                "Strings like violins stay in Other: no model can split them out yet.")
         if not self._stems_ok:
             hint = "Not installed. Run the installer again and choose stem separation to turn this on."
         box, l = self._section("Stems", hint)
         self.chk_stems = QCheckBox("Split into stems first")
         self.chk_stems.toggled.connect(self._update_controls)
         l.insertWidget(1, self.chk_stems)
+        form = self._form()
+        self.stem_count_box = self._compact(QComboBox())
+        self.stem_count_box.addItem("4 parts", 4)
+        self.stem_count_box.addItem("6 parts (adds piano, guitar)", 6)
+        self.stem_count_box.setToolTip("4 parts: vocals, bass, drums, and everything else.\n"
+                                       "6 parts: also takes piano and guitar out of everything else. "
+                                       "Slower, and the first time it downloads another model.")
+        self.stem_count_box.currentIndexChanged.connect(lambda _i: self._update_controls())
+        form.addRow("Split into", self.stem_count_box)
+        l.addLayout(form)
         self.stems_label = QLabel("Find notes in")
         self.stems_label.setObjectName("Hint")
         l.addWidget(self.stems_label)
@@ -441,6 +506,8 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             chk = QCheckBox(name)
             if name == "Drums":
                 chk.setToolTip("Finds drum hits (kick, snare, hi-hat) instead of pitches.")
+            elif name in SIX_ONLY:
+                chk.setToolTip("Only with 6 parts")
             self.stem_checks[name] = chk
             grid.addWidget(chk, i // 2, i % 2)
         l.addLayout(grid)
@@ -581,7 +648,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.act_sheet = menu.addAction("Sheet music (PDF, print, MusicXML)...", self._open_sheet)
         menu.addSeparator()
         self.act_stems = menu.addAction("Stems as WAV files...", self._export_stems)
-        menu.addAction("Recording or notes as WAV (what you hear)...", self._export_sound)
+        menu.addAction("Bounce: mix or parts as WAV or FLAC (what you hear)...", self._export_sound)
         self.act_sound = menu.actions()[-1]
         menu.addSeparator()
         self.act_save_project = menu.addAction("Project (everything, to open again later)...", self._save_project)
@@ -602,6 +669,26 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         l.setContentsMargins(12, 6, 12, 6)
         l.setSpacing(8)
 
+        self.roll_view_btn = QToolButton()
+        self.roll_view_btn.setObjectName("ViewButton")
+        self.roll_view_btn.setText("Piano roll")
+        self.roll_view_btn.setCheckable(True)
+        self.roll_view_btn.setChecked(True)
+        self.roll_view_btn.setToolTip("The notes of every part on one keyboard (F1)")
+        self.tracks_view_btn = QToolButton()
+        self.tracks_view_btn.setObjectName("ViewButton")
+        self.tracks_view_btn.setText("Tracks")
+        self.tracks_view_btn.setCheckable(True)
+        self.tracks_view_btn.setToolTip("Every part as a lane with its waveform, volume and pan, like a DAW (F2)")
+        self.roll_view_btn.clicked.connect(lambda: self._show_view(0))
+        self.tracks_view_btn.clicked.connect(lambda: self._show_view(1))
+        views = QHBoxLayout()
+        views.setSpacing(0)
+        views.addWidget(self.roll_view_btn)
+        views.addWidget(self.tracks_view_btn)
+        l.addLayout(views)
+        l.addSpacing(6)
+
         self.edit_btn = QToolButton()
         self.edit_btn.setObjectName("ModeButton")
         self.edit_btn.setText("Edit notes")
@@ -612,13 +699,48 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         l.addWidget(self.edit_btn)
 
         self.edit_box = QWidget()
+        self.edit_box.setObjectName("Toolbar")
         el = QHBoxLayout(self.edit_box)
-        el.setContentsMargins(0, 0, 0, 0)
+        el.setContentsMargins(12, 0, 12, 6)
         el.setSpacing(6)
-        add_label = QLabel("Add to")
+        from PySide6.QtWidgets import QButtonGroup
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        self.tool_buttons: dict[str, QToolButton] = {}
+        for i, (key, text, tip) in enumerate((
+                ("select", "Select", "Select, move and resize notes. Drag on empty space to select a box (1)"),
+                ("draw", "Draw", "Click to add a note, drag to set its length (2)"),
+                ("erase", "Erase", "Click or drag over notes to remove them (3)"),
+                ("split", "Split", "Click a note to cut it in two there (4)"),
+                ("glue", "Glue", "Click a note to join it to the next note of the same pitch (5)"))):
+            b = QToolButton()
+            b.setObjectName("ToolButton")
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c=False, k=key: self._set_tool(k))
+            self.tool_group.addButton(b, i)
+            self.tool_buttons[key] = b
+            el.addWidget(b)
+        self.tool_buttons["select"].setChecked(True)
+        el.addSpacing(8)
+        add_label = QLabel("Part")
         add_label.setObjectName("Hint")
         self.add_to_box = QComboBox()
-        self.add_to_box.setToolTip("Which part new notes go into when you double-click empty space")
+        self.add_to_box.setToolTip("The part being edited. New and pasted notes go into it.")
+        self.lock_chk = QCheckBox("Only this part")
+        self.lock_chk.setChecked(True)
+        self.lock_chk.setToolTip("Other parts are dimmed and can't be changed by accident")
+        self.lock_chk.toggled.connect(lambda on: self.roll.set_lock_others(on))
+        self.vel_chk = QCheckBox("Strength lane")
+        self.vel_chk.setChecked(True)
+        self.vel_chk.setToolTip("Show each note's strength as a bar under the notes. Drag the bars to change it.")
+        self.vel_chk.toggled.connect(lambda on: self.roll.set_show_velocity(on))
+        self.quantize_btn = QToolButton()
+        self.quantize_btn.setText("Quantize")
+        self.quantize_btn.setToolTip("Line the selected notes up with the grid (Q). Uses the Snap setting, "
+                                     "or half beats when Snap is off.")
+        self.quantize_btn.clicked.connect(lambda: self.roll._report_count(self.roll.quantize_selected(), "Quantized"))
         self.add_to_box.currentIndexChanged.connect(self._on_add_to_changed)
         self.strength_spin = QSpinBox()
         self.strength_spin.setRange(5, 100)
@@ -643,11 +765,11 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.cleanup_btn.setToolTip("Remove stray notes, join broken ones, line notes up with the beat")
         self.cleanup_btn.clicked.connect(self._open_cleanup)
         self.add_to_box.setProperty("i18n_skip_items", True)
-        for w in (add_label, self.add_to_box, self.strength_spin, self.undo_btn, self.redo_btn, self.revert_btn,
-                  self.cleanup_btn):
+        for w in (add_label, self.add_to_box, self.lock_chk, self.strength_spin, self.vel_chk, self.quantize_btn,
+                  self.undo_btn, self.redo_btn, self.revert_btn, self.cleanup_btn):
             el.addWidget(w)
+        el.addStretch(1)
         self.edit_box.hide()
-        l.addWidget(self.edit_box)
 
         self.snap_box = QComboBox()
         for label, value in SNAP_CHOICES:
@@ -678,7 +800,15 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         for w in (self.span_label, self.zoom_btn, self.clear_span_btn, self.loop_btn):
             l.addWidget(w)
         self._update_span_controls(None)
-        return bar
+        both = QWidget()
+        both.setObjectName("Toolbar")
+        rows = QVBoxLayout(both)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+        bar.setStyleSheet("QWidget#Toolbar { border-bottom: none; }")
+        rows.addWidget(bar)
+        rows.addWidget(self.edit_box)
+        return both
 
     def _build_tabs(self) -> QTabWidget:
         tabs = QTabWidget()
@@ -711,6 +841,11 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.transcript.itemClicked.connect(self._on_transcript_clicked)
         pl.addWidget(self.transcript, 1)
         tabs.addTab(page, "Transcript")
+
+        self.mixer_panel = MixerPanel()
+        self.mixer_panel.mixChanged.connect(self._on_track_mix)
+        self.mixer_panel.partsChanged.connect(lambda _t: self._on_parts_changed())
+        tabs.addTab(self.mixer_panel, "Mixer")
 
         notes_page = QWidget()
         nl = QVBoxLayout(notes_page)
@@ -772,6 +907,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.stop_btn = tool(QStyle.SP_MediaStop, "Stop", self.stop_playback)
         for b in (self.start_btn, self.play_btn, self.stop_btn):
             l.addWidget(b)
+        self._build_record_button(l)
 
         self.clock = QLabel("0:00.0 / 0:00.0")
         self.clock.setProperty("i18n_skip", True)
@@ -809,20 +945,21 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.volume.setRange(0, 100)
         self.volume.setFixedWidth(90)
         self.volume.setToolTip("Volume")
-        self.volume.valueChanged.connect(lambda v: self.audio_out.setVolume(v / 100.0))
+        self.volume.valueChanged.connect(lambda v: self.player.set_volume(v / 100.0))
         l.addSpacing(6)
         l.addWidget(vol_icon)
         l.addWidget(self.volume)
 
         self.follow_chk = QCheckBox("Follow")
         self.follow_chk.setToolTip("Keep the playhead in view while playing")
-        self.follow_chk.toggled.connect(lambda on: setattr(self.roll, "follow", on))
+        self.follow_chk.toggled.connect(lambda on: (setattr(self.roll, "follow", on),
+                                                    setattr(self.tracks_view.canvas, "follow", on)))
         l.addSpacing(8)
         l.addWidget(self.follow_chk)
 
         l.addSpacing(8)
-        for text, tip, slot in (("-", "Zoom out (Ctrl+minus, or Ctrl+scroll)", lambda: self.roll.zoom_time(1 / 1.5)),
-                                ("+", "Zoom in (Ctrl+plus, or Ctrl+scroll)", lambda: self.roll.zoom_time(1.5)),
+        for text, tip, slot in (("-", "Zoom out (Ctrl+minus, or Ctrl+scroll)", lambda: self._zoom(1 / 1.5)),
+                                ("+", "Zoom in (Ctrl+plus, or Ctrl+scroll)", lambda: self._zoom(1.5)),
                                 ("Fit", "Fit the whole file (Ctrl+0)", self._fit_view)):
             b = QToolButton()
             b.setText(text)
@@ -834,13 +971,16 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         return bar
 
     def _build_player(self) -> None:
-        self.player = QMediaPlayer(self)
-        self.audio_out = QAudioOutput(self)
-        self.player.setAudioOutput(self.audio_out)
-        self.player.playbackStateChanged.connect(self._on_play_state)
-        self.player.durationChanged.connect(self._on_duration)
-        self.player.mediaStatusChanged.connect(self._on_media_status)
-        self.player.errorOccurred.connect(self._on_player_error)
+        self.player = playback.Player(self)
+        self.player.stateChanged.connect(self._on_play_state)
+        self.player.finished.connect(self._on_finished)
+        self.player.failed.connect(self._on_player_error)
+        self.lanes = LaneRenderer(self)
+        self.lanes.rendered.connect(self._on_lane_rendered)
+        self.lanes.progressed.connect(self._on_render_progress)
+        self.lanes.failed.connect(self._on_render_failed)
+        self.lanes.start()
+        QApplication.instance().aboutToQuit.connect(lambda: (self.lanes.stop(), self.lanes.wait(10000)))
         self.ticker = QTimer(self)
         self.ticker.setInterval(33)
         self.ticker.timeout.connect(self._on_tick)
@@ -856,8 +996,10 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         add("Home", lambda: self.seek(0.0))
         add(QKeySequence.Open, self._open_dialog)
         add(["Ctrl+Return", "Ctrl+Enter", "F5"], self.start_analysis)
-        add([QKeySequence.ZoomIn, "Ctrl+="], lambda: self.roll.zoom_time(1.5))
-        add(QKeySequence.ZoomOut, lambda: self.roll.zoom_time(1 / 1.5))
+        add([QKeySequence.ZoomIn, "Ctrl+="], lambda: self._zoom(1.5))
+        add(QKeySequence.ZoomOut, lambda: self._zoom(1 / 1.5))
+        add("F1", lambda: self._show_view(0))
+        add("F2", lambda: self._show_view(1))
         add("Ctrl+0", self._fit_view)
 
         def letter(slot):
@@ -875,6 +1017,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         add(["Ctrl+Y", "Ctrl+Shift+Z"], self.redo)
         add(QKeySequence.Save, self._save_project)
         add("T", letter(lambda: self.result and self._tap()))
+        add("R", letter(lambda: self.rec_btn.isEnabled() and self._toggle_take()))
 
     # Settings -------------------------------------------------------------------
 
@@ -901,14 +1044,17 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._set_combo(self.lang_combo, i18n.language())
         self.lang_combo.blockSignals(False)
         self.chk_stems.setChecked(get_bool("stems/enabled", False) and self._stems_ok)
-        chosen = s.value("stems/note_stems", "Vocals,Bass,Other,Drums")
+        self._set_combo(self.stem_count_box, int(s.value("stems/count", 4)))
+        chosen = s.value("stems/note_stems", "Vocals,Piano,Guitar,Bass,Other,Drums")
         chosen = chosen if isinstance(chosen, str) else ",".join(chosen)
+        if s.value("stems/count") is None:      # saved by a version without piano and guitar stems
+            chosen += ",Piano,Guitar"
         for name, chk in self.stem_checks.items():
             chk.setChecked(name in chosen.split(","))
         device = s.value("device", "cpu")
         self._set_combo(self.device_box, device if (device != "cuda" or self._cuda_ok) else "cpu")
         self.volume.setValue(int(s.value("volume", 85)))
-        self.audio_out.setVolume(self.volume.value() / 100.0)
+        self.player.set_volume(self.volume.value() / 100.0)
         self.follow_chk.setChecked(get_bool("follow", True))
         self._set_combo(self.snap_box, int(s.value("edit/snap", 0)))
         self.roll.snap_div = self.snap_box.currentData()
@@ -937,6 +1083,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         s.setValue("sound/click_level", self.click_level.value())
         s.setValue("stems/enabled", self.chk_stems.isChecked())
         s.setValue("stems/note_stems", ",".join(n for n, c in self.stem_checks.items() if c.isChecked()))
+        s.setValue("stems/count", self.stem_count_box.currentData())
         s.setValue("device", self.device_box.currentData())
         s.setValue("volume", self.volume.value())
         s.setValue("follow", self.follow_chk.isChecked())
@@ -978,8 +1125,10 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.chk_stems.setEnabled(self._stems_ok and not busy)
         stems = self.chk_stems.isChecked() and self._stems_ok and not busy
         self.stems_label.setEnabled(stems and notes)
-        for chk in self.stem_checks.values():
-            chk.setEnabled(stems and notes)
+        self.stem_count_box.setEnabled(stems)
+        six = self.stem_count_box.currentData() == 6
+        for name, chk in self.stem_checks.items():
+            chk.setEnabled(stems and notes and (six or name not in SIX_ONLY))
         self.analyze_btn.setVisible(not busy)
         self.cancel_btn.setVisible(busy)
         self.analyze_btn.setEnabled(self.source_path is not None)
@@ -1043,18 +1192,21 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.file_label.setText(path.name)
         self.setWindowTitle(f"{path.name} - {APP_NAME}")
         self.roll.clear(tr("Press Analyze to find the words and notes."))
-        self.status_text.setText(tr("File opened. You can play it now or press Analyze."))
-        self._set_source(str(path), keep_position=False)
+        self._prepare_preview(path)
         self._update_controls()
 
     def _clear_results(self) -> None:
         old = self.result
         self.result = None
-        if self.render_thread:
-            self.render_thread.stop()
-        self._render_pending = False
-        self._mix_cache.clear()
-        self._loaded_sig = self._want_sig = "plain"
+        self.lanes.forget_all()
+        self.player.mix.set_lanes([])
+        with self.player.mix.lock:
+            self.player.mix.click = None
+        self._clips.clear()
+        self._notes_clips.clear()
+        self._lane_files.clear()
+        self._lane_want.clear()
+        self._lane_loaded.clear()
         self._undo.clear()
         self._redo.clear()
         self._original = None
@@ -1070,6 +1222,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._seg_starts, self._current_seg = [], -1
         self.lang_label.setText(tr("Click a line to jump to it."))
         self._fill_parts([])
+        self.tracks_view.clear()
         self._extras_clear()
         self.inspector_tabs.setCurrentIndex(0)
         self.note_filter = NoteFilter()
@@ -1093,7 +1246,9 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             sensitivity=self.sens.value(),
             min_note_ms=self.min_len.value(),
             separate=self.chk_stems.isChecked() and self._stems_ok,
-            note_stems=[n for n, c in self.stem_checks.items() if c.isChecked()],
+            note_stems=[n for n, c in self.stem_checks.items() if c.isChecked()
+                        and (self.stem_count_box.currentData() == 6 or n not in SIX_ONLY)],
+            stem_count=self.stem_count_box.currentData() or 4,
             chords=self.chk_chords.isChecked(),
             device=self.device_box.currentData(),
         )
@@ -1190,6 +1345,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._fill_transcript(r)
         self.summary.set_result(r)
         self._fill_parts(r.tracks)
+        self.tracks_view.set_data(r.duration, r.tracks, r.beats, r.meter)
         if r.tracks:
             self.inspector_tabs.setCurrentIndex(1)
         self.scale_filter.set_detected_key(r.key)
@@ -1197,11 +1353,11 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._refresh_edit_tracks()
         self._fill_notes_table()
 
-        self._loaded_sig = self._want_sig = "plain"
-        self._set_source(r.audio_files["Original"], keep_position=True)
-        self.pos_slider.setRange(0, int(r.duration * 1000))
-        self._sync_position(self.player.position() / 1000.0)
+        self.player.set_duration(r.duration)
         self._set_combo(self.mode_box, "recording")
+        self._rebuild_lanes()
+        self.pos_slider.setRange(0, int(r.duration * 1000))
+        self._sync_position(self.player.position())
         self._extras_show_result(r)
         self._update_controls()
 
@@ -1320,9 +1476,13 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             if i18n.language() != "en":
                 i18n.retranslate(row, i18n.language())
             row.changed.connect(self._on_parts_changed)
+            row.mixChanged.connect(self._on_track_mix)
             row.instrumentPicked.connect(lambda key, t=track: self._on_instrument_picked(t, key))
             self.parts_layout.addWidget(row)
             self.part_rows.append(row)
+        self.mixer_panel.set_tracks(tracks)
+        if i18n.language() != "en":
+            i18n.retranslate(self.mixer_panel, i18n.language())
         self.parts_box.setVisible(bool(tracks))
         self.play_empty.setVisible(not tracks)
 
@@ -1333,12 +1493,26 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             t.visible = (not t.muted) and (t.solo or not solo)
         if refresh:
             self.roll.refresh()
+            self.tracks_view.refresh()
 
     def _on_parts_changed(self) -> None:
         self._apply_visibility()
         self._refresh_edit_tracks()
         self._schedule_refresh()
         self._queue_sound()
+        self._sync_mix_views()
+
+    def _on_track_mix(self, _track) -> None:
+        """A part's volume or pan moved: heard at once, and shown everywhere it appears."""
+        self._apply_mix()
+        self._sync_mix_views()
+
+    def _sync_mix_views(self) -> None:
+        for row in getattr(self, "part_rows", []):
+            row.sync()
+        self.mixer_panel.sync()
+        if hasattr(self, "tracks_view"):
+            self.tracks_view.sync_headers()
 
     def _on_instrument_picked(self, track, key: str) -> None:
         self.settings.setValue(f"instrument/{track.name}", key)
@@ -1350,21 +1524,39 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         box.blockSignals(True)
         box.clear()
         tracks = self._tracks()
-        for ti, t in enumerate(tracks):
+        for t in tracks:
             if t.visible:
-                box.addItem(tr(t.name), ti)
+                box.addItem(tr(t.name), t.uid)       # by uid: indexes change when a take is removed
         pick = box.findData(current) if current is not None else -1
         if pick < 0:
-            pitched = [i for i in range(box.count()) if tracks[box.itemData(i)].name != "Drums"]
+            drums = {t.uid for t in tracks if t.drums}
+            pitched = [i for i in range(box.count()) if box.itemData(i) not in drums]
             pick = pitched[0] if pitched else 0
         if box.count():
             box.setCurrentIndex(pick)
         box.blockSignals(False)
-        self.roll.edit_track = box.currentData() if box.count() else 0
+        self.roll.set_edit_track(self._edit_index())
+
+    def _edit_index(self) -> int:
+        """Index of the part chosen in Part (the one being edited)."""
+        uid = self.add_to_box.currentData()
+        for ti, t in enumerate(self._tracks()):
+            if t.uid == uid:
+                return ti
+        return 0
 
     def _on_add_to_changed(self, _index: int) -> None:
-        data = self.add_to_box.currentData()
-        self.roll.edit_track = data if data is not None else 0
+        self.roll.set_edit_track(self._edit_index())
+
+    def _set_tool(self, key: str) -> None:
+        self.roll.set_tool(key)
+        self.tool_buttons[key].setChecked(True)
+        hints = {"select": "Select tool: drag notes to move them, drag their right edge to resize.",
+                 "draw": "Draw tool: click to add a note to the part being edited, drag to set its length.",
+                 "erase": "Erase tool: click or drag over notes to remove them.",
+                 "split": "Split tool: click a note where it should be cut in two.",
+                 "glue": "Glue tool: click a note to join it to the next note of the same pitch."}
+        self.status_text.setText(tr(hints[key]))
 
     # Filter ---------------------------------------------------------------------
 
@@ -1397,6 +1589,8 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
 
     def _update_span_controls(self, span) -> None:
         has = span is not None
+        if hasattr(self, "tracks_view"):
+            self.tracks_view.set_span(span, self.loop_btn.isChecked() and has)
         self.zoom_btn.setEnabled(has or self.roll_saved_view())
         self.clear_span_btn.setEnabled(has)
         self.loop_btn.setEnabled(has)
@@ -1410,7 +1604,8 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.zoom_btn.setText(tr("Zoom back") if self.roll_saved_view() else tr("Zoom to span"))
         if hasattr(self, "roll"):
             self.roll.set_loop_visual(self.loop_btn.isChecked() and has)
-        self._update_ticker_interval()
+        if hasattr(self, "player"):
+            self.player.set_loop(self._loop_span())
 
     def roll_saved_view(self) -> bool:
         return hasattr(self, "roll") and self.roll.saved_view is not None
@@ -1423,8 +1618,45 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self._update_span_controls(self.roll.span)
 
     def _fit_view(self) -> None:
+        if self.view_stack.currentIndex() == 1:
+            self.tracks_view.canvas.fit()
+            return
         self.roll.fit()
         self._update_span_controls(self.roll.span)
+
+    def _zoom(self, factor: float) -> None:
+        if self.view_stack.currentIndex() == 1:
+            self.tracks_view.canvas.zoom_time(factor)
+        else:
+            self.roll.zoom_time(factor)
+
+    def _show_view(self, index: int) -> None:
+        self.view_stack.setCurrentIndex(index)
+        self.roll_view_btn.setChecked(index == 0)
+        self.tracks_view_btn.setChecked(index == 1)
+        if index == 1:
+            self.tracks_view.set_playhead(self.player.position())
+
+    def _edit_track_in_roll(self, ti: int) -> None:
+        """Double-click on a part in the Tracks view: edit its notes in the piano roll."""
+        tracks = self._tracks()
+        if not (0 <= ti < len(tracks)):
+            return
+        self._show_view(0)
+        if not tracks[ti].visible:
+            self.status_text.setText(tr("{part} is muted. Unmute it to edit its notes.").format(part=tr(tracks[ti].name)))
+            return
+        if self.edit_btn.isEnabled() and not self.edit_btn.isChecked():
+            self.edit_btn.setChecked(True)
+        i = self.add_to_box.findData(tracks[ti].uid)
+        if i >= 0:
+            self.add_to_box.setCurrentIndex(i)
+
+    def _on_tracks_span(self, span, final: bool) -> None:
+        if span is None:
+            self.roll.clear_span()
+        else:
+            self.roll.set_span(span[0], span[1], final)
 
     def _on_loop_toggled(self, on: bool) -> None:
         self._update_span_controls(self.roll.span)
@@ -1438,10 +1670,6 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             return self.roll.span
         return None
 
-    def _update_ticker_interval(self) -> None:
-        if hasattr(self, "ticker"):
-            self.ticker.setInterval(12 if self._loop_span() else 33)
-
     def _update_selection_details(self) -> None:
         r = self.result
         span = self.roll.span
@@ -1453,6 +1681,9 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
 
     # Editing --------------------------------------------------------------------
 
+    def status_text_set(self, text: str) -> None:
+        self.status_text.setText(text)
+
     def _set_edit_mode(self, on: bool) -> None:
         self.edit_box.setVisible(on)
         self.roll.set_edit_mode(on)
@@ -1461,7 +1692,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
             self._refresh_edit_tracks()
             self.status_text.setText(tr(
                 "Edit mode. Drag a note to move it, drag its right edge to resize, double-click empty space "
-                "to add one, Delete removes the selected notes. Hold Shift and drag for a span."))
+                "to add one, right-click for copy, paste, quantize and more. Hold Shift and drag for a span."))
         else:
             self.status_text.setText(tr("Edit mode off."))
         self._update_undo_buttons()
@@ -1470,12 +1701,23 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         self.roll.snap_div = self.snap_box.currentData() or 0
 
     def _snapshot(self) -> dict:
-        return {t.name: [(n.start, n.end, n.pitch, n.velocity, n.edited) for n in t.notes]
-                for t in self._tracks()}
+        """Every part's notes, by part uid (names can change: a take can be renamed), and
+        where each take starts, since moving a take moves its notes too."""
+        snap = {t.uid: [(n.start, n.end, n.pitch, n.velocity, n.edited) for n in t.notes] for t in self._tracks()}
+        snap[TAKE_OFFSETS] = {t.uid: t.offset for t in self._tracks() if t.take}
+        return snap
 
     def _restore(self, snap: dict) -> None:
+        moved = False
+        offsets = snap.get(TAKE_OFFSETS, {})
         for t in self._tracks():
-            t.notes[:] = [Note(*row) for row in snap.get(t.name, [])]
+            if t.uid in snap:
+                t.notes[:] = [Note(*row) for row in snap[t.uid]]
+            if t.uid in offsets and abs(offsets[t.uid] - t.offset) > 1e-9:
+                t.offset = offsets[t.uid]
+                moved = True
+        if moved:
+            self._rebuild_lanes()
         self.roll.selected = set()
         self.roll.reindex()
         self.roll.selectionChanged.emit()
@@ -1496,6 +1738,7 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
                                         "Notes on instruments to hear them."))
 
     def _after_notes_changed(self) -> None:
+        self.tracks_view.refresh()
         self._edit_count += 1
         self._notes_dirty = True
         self._schedule_refresh()
@@ -1659,188 +1902,246 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
 
     # Playback ---------------------------------------------------------------------
 
-    def _set_source(self, path: str, keep_position: bool = True) -> None:
-        playing = self.player.playbackState() == QMediaPlayer.PlayingState
-        position = self.player.position()
-        self._pending_seek = None
-        self._resume_after_load = False
-        self.player.setSource(QUrl.fromLocalFile(path))
-        # Qt reports the status of the old file while it switches over, so the place to go back
-        # to is only noted after that, and used when the new file has really loaded.
-        self._pending_seek = position if keep_position and position > 0 else None
-        self._resume_after_load = playing and keep_position
+    def _prepare_preview(self, path: Path) -> None:
+        """Before an analysis the file itself plays. It is turned into a WAV first."""
+        self.player.pause()
+        self.player.mix.set_lanes([])
+        self.player.set_duration(0.0)
+        self.player.seek(0.0)
+        self.pos_slider.setRange(0, 0)
+        folder = _work_root() / "preview"
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob("*.wav"):
+            _remove_file(old)
+        out = folder / f"preview-{int(time.time() * 1000)}.wav"
+        thread = DecodeThread(path, out, self)
+        thread.decoded.connect(self._on_preview_ready)
+        thread.failed.connect(self._on_preview_failed)
+        thread.finished.connect(lambda t=thread: self._decoders.discard(t))
+        thread.finished.connect(thread.deleteLater)
+        self._decoders.add(thread)
+        self.status_text.setText(tr("Getting the file ready to play..."))
+        thread.start()
+
+    def _on_preview_ready(self, source: str, wav: str, duration: float) -> None:
+        if self.source_path is None or str(self.source_path) != source or self.result is not None:
+            _remove_file(wav)
+            return
+        try:
+            self.player.mix.set_lanes([playback.Lane("preview", audio=playback.Clip.from_wav(wav))])
+        except (OSError, ValueError) as exc:
+            self._on_preview_failed(source, str(exc))
+            return
+        self.player.set_duration(duration)
+        self.pos_slider.setRange(0, int(duration * 1000))
+        self.roll.set_duration(duration)
+        self._sync_position(0.0)
+        self.status_text.setText(tr("File opened. You can play it now or press Analyze."))
+
+    def _on_preview_failed(self, source: str, message: str) -> None:
+        if self.source_path is not None and str(self.source_path) == source and self.result is None:
+            self.status_text.setText(tr("This file can't be played here, but you can still analyze it."))
 
     def _on_mode_changed(self) -> None:
         self._queue_sound()
 
     def _queue_sound(self) -> None:
-        """Something that changes what you hear changed. Rebuild shortly, once things settle."""
-        if hasattr(self, "_sound_timer") and self.result:
-            self._sound_timer.start()
+        """Something that changes what you hear changed. Volumes, mutes and the Play setting
+        apply at once; new renders of the notes start shortly, once things settle."""
+        if not hasattr(self, "_sound_timer") or not self.result:
+            return
+        self._apply_mix()
+        self._sound_timer.start()
 
-    def _make_spec(self) -> mixer.MixSpec | None:
+    def _clip(self, path: str, offset: float = 0.0) -> playback.Clip | None:
+        key = (path, round(offset, 5))
+        clip = self._clips.get(key)
+        if clip is None:
+            try:
+                clip = playback.Clip.from_wav(path, offset)
+            except (OSError, ValueError) as exc:
+                log.warning("Could not open %s for playback: %s", path, exc)
+                return None
+            self._clips[key] = clip
+        return clip
+
+    def _rebuild_lanes(self) -> None:
+        """Sets up one mixer lane per part (or one for the recording when there are no parts)."""
         r = self.result
-        if not r:
-            return None
-        mode = self.mode_box.currentData()
+        lanes = []
+        if r:
+            for t in r.tracks:
+                lanes.append(playback.Lane(t.uid, audio=self._clip(t.audio, t.offset) if t.audio else None,
+                                           notes=self._notes_clips.get(t.uid), always_audio=t.take))
+            if not r.tracks:
+                lanes.append(playback.Lane("original", audio=self._clip(r.audio_files["Original"])))
+        self.player.mix.set_lanes(lanes)
+        self._apply_mix()
+        self._apply_sound()
+
+    def _apply_mix(self) -> None:
+        """Volume, pan, mute, solo, the Play setting and the click: heard right away."""
+        mix = self.player.mix
+        with mix.lock:
+            mix.mode = self.mode_box.currentData() or "recording"
+            mix.notes_level = self.notes_level.value() / 100.0
+            mix.click_on = self.click_chk.isChecked()
+            mix.click_level = self.click_level.value() / 100.0
+            for t in self._tracks():
+                mix.update_lane(t.uid, gain=playback.db_to_gain(t.volume_db), pan=t.pan, audible=t.visible)
+
+    def _notes_job(self, t) -> mixer.NotesJob:
         flt = self.note_filter
-        parts = []
-        for t in r.tracks:
-            notes = [] if mode == "recording" else [(n.start, n.end, n.pitch, n.velocity)
-                                                    for n in t.notes if flt.allows(n.pitch, t.name == "Drums")]
-            parts.append(mixer.PartSpec(t.name, t.audio, t.visible, t.instrument, notes))
-        click = list(r.beats) if (self.click_chk.isChecked() and r.beats) else []
-        return mixer.MixSpec(mode, r.duration, self.notes_level.value() / 100.0, self.room_chk.isChecked(), parts,
-                             click=click, click_meter=r.meter, click_level=self.click_level.value() / 100.0)
+        notes = [(n.start, n.end, n.pitch, n.velocity) for n in t.notes if flt.allows(n.pitch, t.drums)]
+        return mixer.NotesJob(t.uid, t.instrument, notes, self.result.duration, self.room_chk.isChecked())
 
     def _apply_sound(self) -> None:
-        spec = self._make_spec()
-        if spec is None:
+        """Starts rendering whatever the mix needs and doesn't have yet: the notes of each part
+        on its instrument (only when the Play setting uses them) and the click track."""
+        r = self.result
+        if not r:
             return
-        if spec.is_plain():
-            sig, path = "plain", self.result.audio_files["Original"]
-        else:
-            sig = spec.signature()
-            path = self._mix_cache.get(sig)
-            if path and not Path(path).exists():
-                path = None
-        self._want_sig = sig
-        if sig == self._loaded_sig:
-            if self.render_thread:
-                self.render_thread.stop()
-            return
-        if path:
-            self._load_playback(sig, path)
-            return
-        if self.render_thread:
-            self._render_pending = True
-            self.render_thread.stop()
-            return
-        out = Path(self.result.work_dir) / f"mix-{uuid.uuid4().hex[:8]}.wav"
-        self.render_thread = RenderThread(spec, out, sig, self)
-        self.render_thread.progressed.connect(self._on_render_progress)
-        self.render_thread.rendered.connect(self._on_rendered)
-        self.render_thread.failed.connect(self._on_render_failed)
-        self.render_thread.finished.connect(self._on_render_thread_finished)
-        self.status_text.setText("Preparing the sound...")
-        self.render_thread.start()
+        folder = Path(r.work_dir) / "lanes"
+        folder.mkdir(parents=True, exist_ok=True)
+        jobs = []
+        if (self.mode_box.currentData() or "recording") != "recording":
+            jobs += [self._notes_job(t) for t in r.tracks]
+        if self.click_chk.isChecked() and r.beats:
+            jobs.append(mixer.ClickJob(list(r.beats), r.meter, r.duration))
+        waiting = False
+        for job in jobs:
+            if not job.notes and isinstance(job, mixer.NotesJob):
+                self._lane_want[job.uid] = ""
+                self._use_lane(job.uid, "", None)
+                continue
+            sig = job.signature()
+            if self._lane_want.get(job.uid) == sig:
+                waiting = waiting or self._lane_loaded.get(job.uid) != sig
+                continue
+            self._lane_want[job.uid] = sig
+            path = self._lane_files.get(sig)
+            if path and Path(path).exists():
+                self._use_lane(job.uid, sig, path)
+            else:
+                # every render gets a file of its own, so one never writes over a file that is playing
+                self._lane_serial += 1
+                self.lanes.request(job, sig, folder / f"{job.uid}-{sig[:12]}-{self._lane_serial}.wav")
+                waiting = True
+        if waiting:
+            self.status_text.setText(tr("Preparing the sound..."))
 
-    def _load_playback(self, sig: str, path: str) -> None:
-        self._loaded_sig = sig
-        self._set_source(path, keep_position=True)
+    def _use_lane(self, uid: str, sig: str, path: str | None) -> None:
+        old_sig = self._lane_loaded.get(uid)
+        clip = None
+        if path:
+            try:
+                clip = playback.Clip.from_wav(path)
+            except (OSError, ValueError) as exc:
+                log.warning("Could not open a rendered part: %s", exc)
+                return
+            self._lane_files[sig] = path
+        self._lane_loaded[uid] = sig
+        mix = self.player.mix
+        if uid == "click":
+            with mix.lock:
+                mix.click = clip
+        else:
+            if clip is None:
+                self._notes_clips.pop(uid, None)
+            else:
+                self._notes_clips[uid] = clip
+            mix.update_lane(uid, notes=clip)
+        # the sound it replaced is not needed again unless the edit is undone, which renders it anew
+        if old_sig and old_sig != sig and old_sig not in self._lane_want.values() \
+                and old_sig not in self._lane_loaded.values():
+            old_path = self._lane_files.pop(old_sig, None)
+            if old_path:
+                QTimer.singleShot(1500, lambda p=old_path: _remove_file(p))
+
+    def _on_lane_rendered(self, uid: str, sig: str, path: str) -> None:
+        if not self.result or self._lane_want.get(uid) != sig or not Path(path).is_relative_to(self.result.work_dir) \
+                or self._lane_loaded.get(uid) == sig:     # (an identical render is already playing)
+            _remove_file(path)
+            return
+        self._use_lane(uid, sig, path)
+        if not self.lanes.busy():
+            self.status_text.setText(tr("Sound ready."))
 
     def _on_render_progress(self, fraction: float) -> None:
         self.status_text.setText(tr("Preparing the sound... {n}%").format(n=f"{fraction * 100:.0f}"))
-
-    def _on_rendered(self, sig: str, path: str) -> None:
-        self._mix_cache[sig] = path
-        while len(self._mix_cache) > 4:
-            for old_sig in list(self._mix_cache):
-                if old_sig not in (sig, self._loaded_sig):
-                    old = self._mix_cache.pop(old_sig)
-                    QTimer.singleShot(1500, lambda p=old: _remove_file(p))
-                    break
-            else:
-                break
-        if sig == self._want_sig:
-            self._load_playback(sig, path)
-            self.status_text.setText(tr("Sound ready."))
 
     def _on_render_failed(self, message: str, details: str) -> None:
         self.status_text.setText(tr("Could not build the sound."))
         show_message(self, QMessageBox.Warning, tr("Could not build the sound for playback."),
                      details=details, informative=message)
 
-    def _on_render_thread_finished(self) -> None:
-        if self.render_thread:
-            self.render_thread.deleteLater()
-        self.render_thread = None
-        if self._render_pending:
-            self._render_pending = False
-            self._apply_sound()
+    def _on_player_error(self, message: str) -> None:
+        self.status_text.setText(tr("Playback problem: {message}. You can still analyze the file.").format(
+            message=tr(message)))
 
-    def _on_media_status(self, status) -> None:
-        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
-            if self._pending_seek is not None:
-                self.player.setPosition(self._pending_seek)
-                self._pending_seek = None
-            if self._resume_after_load:
-                self._resume_after_load = False
-                self.player.play()
-        elif status == QMediaPlayer.EndOfMedia:
-            span = self._loop_span()
-            if span and self.player.playbackState() != QMediaPlayer.PausedState:
-                self.seek(span[0])
-                self.player.play()
-            else:
-                self._sync_position(self._duration())
-
-    def _on_duration(self, ms: int) -> None:
-        if not self.result and ms > 0:
-            self.pos_slider.setRange(0, ms)
-            self.roll.set_duration(ms / 1000.0)
-            self._sync_position(self.player.position() / 1000.0)
-
-    def _on_player_error(self, error, message: str) -> None:
-        if error != QMediaPlayer.NoError:
-            self.status_text.setText(tr("Playback problem: {message}. You can still analyze the file.").format(
-                message=message))
+    def _on_finished(self) -> None:
+        self._sync_position(self._duration())
 
     def _duration(self) -> float:
         if self.result:
             return self.result.duration
-        return max(0.0, self.player.duration() / 1000.0)
+        return self.player.duration
 
     def toggle_play(self) -> None:
         if self.source_path is None:
             return
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self.player.is_playing():
             self.player.pause()
         else:
             span = self._loop_span()
             if span:
-                t = self.player.position() / 1000.0
+                t = self.player.position()
                 if t < span[0] - 0.02 or t >= span[1] - 0.02:
                     self.seek(span[0])
             self.player.play()
 
     def stop_playback(self) -> None:
-        self.player.stop()
+        self.player.pause()
         span = self._loop_span()
-        self._sync_position(span[0] if span else 0.0)
-        if span:
-            self.seek(span[0])
+        self.seek(span[0] if span else 0.0)
 
     def seek(self, seconds: float) -> None:
         if self.source_path is None:
             return
         seconds = min(max(0.0, seconds), self._duration() or seconds)
-        self.player.setPosition(int(seconds * 1000))
+        self.player.seek(seconds)
         self._sync_position(seconds)
 
     def _on_slider_released(self) -> None:
         self._slider_held = False
         self.seek(self.pos_slider.value() / 1000.0)
 
-    def _on_play_state(self, state) -> None:
-        playing = state == QMediaPlayer.PlayingState
+    def _on_play_state(self, playing: bool) -> None:
         self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause if playing else QStyle.SP_MediaPlay))
         if playing:
             self.ticker.start()
         else:
             self.ticker.stop()
-            self._sync_position(self.player.position() / 1000.0)
+            self._sync_position(self.player.position())
+            self.player.mix.take_meters()
+            self.mixer_panel.reset_meters()
+            if hasattr(self, "tracks_view"):
+                self.tracks_view.reset_meters()
 
     def _on_tick(self) -> None:
-        t = self.player.position() / 1000.0
-        span = self._loop_span()
-        if span and span[0] - 0.05 <= t and t >= span[1] - 0.012:
-            self.seek(span[0])
-            return
-        self._sync_position(t)
+        self._sync_position(self.player.position())
+        peaks, master = self.player.mix.take_meters()
+        self._push_meters(peaks, master)
+
+    def _push_meters(self, peaks: dict, master: float) -> None:
+        self.mixer_panel.push_meters(peaks, master)
+        if hasattr(self, "tracks_view"):
+            self.tracks_view.push_meters(peaks)
 
     def _sync_position(self, t: float) -> None:
         self.roll.set_playhead(t)
+        if self.view_stack.currentIndex() == 1:
+            self.tracks_view.set_playhead(t)
         self.clock.setText(f"{format_time(t)} / {format_time(self._duration())}")
         if not self._slider_held:
             self.pos_slider.blockSignals(True)
@@ -1959,23 +2260,70 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         except Exception as exc:
             show_message(self, QMessageBox.Critical, tr("Could not save the stems."), informative=str(exc))
 
+    def _bounce_spec(self):
+        """Everything needed to mix the song again away from the player, as it sounds now."""
+        from .bounce import BounceSpec, LaneSpec
+        r = self.result
+        mode = self.mode_box.currentData() or "recording"
+        spec = BounceSpec(r.duration, mode, self.notes_level.value() / 100.0, self.volume.value() / 100.0,
+                          click_level=self.click_level.value() / 100.0)
+        for t in r.tracks:
+            lane = LaneSpec(t.uid, tr(t.name), t.audio, t.offset, t.take, playback.db_to_gain(t.volume_db), t.pan,
+                            t.visible)
+            if mode != "recording":
+                job = self._notes_job(t)
+                if job.notes:
+                    lane.notes_job = job
+                    path = self._lane_files.get(job.signature())
+                    lane.notes_file = path if path and Path(path).exists() else None
+            spec.lanes.append(lane)
+        if not r.tracks:
+            spec.lanes.append(LaneSpec("original", tr("Recording"), r.audio_files["Original"], 0.0, False, 1.0, 0.0,
+                                       True))
+        if self.click_chk.isChecked() and r.beats:
+            spec.click_job = mixer.ClickJob(list(r.beats), r.meter, r.duration)
+            path = self._lane_files.get(spec.click_job.signature())
+            spec.click_file = path if path and Path(path).exists() else None
+        return spec
+
     def _export_sound(self) -> None:
-        """Saves exactly what the Play bar plays right now."""
-        spec = self._make_spec()
-        if spec is None:
+        """Bounce: saves what the mixer plays, as one file or one per part."""
+        from . import bounce
+        r = self.result
+        if not r or self._project_thread is not None:
             return
-        path = self._save_path("Save what you hear as WAV", "wav", "WAV files (*.wav)")
-        if path is None:
+        dialog = bounce.BounceDialog(self, self.roll.span is not None, len(r.tracks))
+        if dialog.exec() != bounce.QDialog.Accepted:
             return
-        if spec.is_plain():
-            self._export(lambda p: shutil.copyfile(self.result.audio_files["Original"], p), path)
-            return
-        self.status_text.setText(tr("Saving..."))
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            self._export(lambda p: mixer.render_mix(spec, p), path)
-        finally:
-            QApplication.restoreOverrideCursor()
+        each, flac = dialog.each_part(), dialog.flac()
+        span = self.roll.span if dialog.span_only() else None
+        title = "".join(c for c in self._project_title() if c.isalnum() or c in " -_()").strip() or "audio"
+        if each:
+            start = self.settings.value("export_dir", str(self.source_path.parent if self.source_path else Path.home()))
+            folder = QFileDialog.getExistingDirectory(self, tr("Choose a folder for the parts"), str(start))
+            if not folder:
+                return
+            target = Path(folder)
+            self.settings.setValue("export_dir", folder)
+        else:
+            ext = "flac" if flac else "wav"
+            target = self._save_path("Save what you hear", ext, "FLAC files (*.flac)" if flac else "WAV files (*.wav)")
+            if target is None:
+                return
+        spec = self._bounce_spec()
+        work = r.work_dir
+
+        def job(report, should_stop):
+            return bounce.run(spec, target, each, span, flac, title, work, report, should_stop)
+
+        def done(paths):
+            if len(paths) == 1:
+                self.status_text.setText(tr("Saved {path}").format(path=paths[0]))
+            else:
+                self.status_text.setText(tr_n(len(paths), "Saved {n} file to {folder}", "Saved {n} files to {folder}")
+                                         .replace("{folder}", str(target)))
+
+        self._run_project_job(job, tr("Bouncing..."), done, "Could not save the sound.")
 
     def _copy_transcript(self) -> None:
         if self.result and self.result.segments:
@@ -2009,18 +2357,23 @@ class MainWindow(ExtrasMixin, UpdateMixin, QMainWindow):
         elif not self._confirm_discard_edits(tr("Closing the app discards them.")):
             event.ignore()
             return
-        if self.render_thread:
-            self.render_thread.stop()
-            self.render_thread.wait()
-        for job in (self._project_thread, self._translate_thread):
+        if self._take_rec is not None:
+            self._take_rec.stop()
+            self._take_rec = None
+        self.lanes.stop()
+        self.lanes.wait(10000)
+        self.tracks_view.shutdown()
+        for thread in list(self._decoders):
+            thread.wait(30000)
+        for job in (self._project_thread, self._translate_thread, self._take_job):
             if job is not None:
                 job.stop()
                 job.wait(20000)
         self._save_settings()
-        self.player.stop()
-        self.player.setSource(QUrl())
-        self.audition.player.stop()
-        self.audition.player.setSource(QUrl())
+        self.player.shutdown()
+        self.player.mix.set_lanes([])
+        self._clips.clear()
+        self._notes_clips.clear()
         if self.result:
             remove_dir(self.result.work_dir)
         remove_dir(self._work_dir)

@@ -1,14 +1,12 @@
 """The Sheet music window: preview, save as PDF, print, or save as MusicXML.
 
-Verovio engraves the MusicXML from notation.py into SVG pages. Qt's SVG renderer only
-understands a simpler kind of SVG, so svg_for_qt() rewrites Verovio's output a little
-(no nested <svg>, plain <text> elements) before drawing it.
+Verovio engraves the MusicXML from notation.py into SVG pages, in a separate process
+(engrave.py). Qt's SVG renderer only understands a simpler kind of SVG, so engrave.svg_for_qt()
+rewrites Verovio's output a little (no nested <svg>, plain <text> elements) before drawing it.
 """
 
 from __future__ import annotations
 
-import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QMarginsF, QObject, QRectF, QSize, Qt, Signal
@@ -17,13 +15,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QHBox
                                QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from . import notation
+from . import engrave, notation
 from .i18n import tr, tr_n
-
-SVG_NS = "http://www.w3.org/2000/svg"
-XLINK_NS = "http://www.w3.org/1999/xlink"
-ET.register_namespace("", SVG_NS)
-ET.register_namespace("xlink", XLINK_NS)
 
 PAPER = [("A4", QPageSize.A4, 2100, 2970), ("Letter", QPageSize.Letter, 2159, 2794)]
 
@@ -33,99 +26,10 @@ def verovio_available() -> bool:
     return importlib.util.find_spec("verovio") is not None
 
 
-def _first_family(families: str) -> str:
-    first = families.split(",")[0].strip().strip("'\"")
-    return first or "Times"
-
-
-def svg_for_qt(svg: str) -> str:
-    """Make Verovio's SVG drawable by QtSvg (SVG Tiny): replace the nested <svg> with a scaled
-    group, and flatten each <text> to one plain run with its real font size."""
-    m = re.search(r'<svg[^>]*width="([\d.]+)px"[^>]*height="([\d.]+)px"', svg)
-    inner = re.search(r'<svg class="definition-scale"([^>]*)viewBox="0 0 ([\d.]+) ([\d.]+)"([^>]*)>', svg)
-    if m and inner:
-        w, h = float(m.group(1)), float(m.group(2))
-        vw, vh = float(inner.group(2)), float(inner.group(3))
-        attrs = (inner.group(1) + inner.group(4)).strip()
-        g = f'<g transform="scale({w / vw:.6f},{h / vh:.6f})" {attrs}>'
-        svg = svg[:inner.start()] + g + svg[inner.end():]
-        last = svg.rfind("</svg>")
-        before = svg.rfind("</svg>", 0, last)
-        svg = svg[:before] + "</g>" + svg[before + 6:]
-    # QtSvg reads a font list like "Times, serif" as one unknown name and falls back to the
-    # window's sans font, which is wider, so lyrics ran into each other. Name one font.
-    svg = re.sub(r'font-family="([^"]*)"', lambda m_: f'font-family="{_first_family(m_.group(1))}"', svg)
-    if "<!DOCTYPE" in svg or "<!ENTITY" in svg:
-        # Verovio never writes these. Refuse them so no entity tricks can reach the XML parser.
-        return svg
-    try:
-        root = ET.fromstring(svg)
-    except ET.ParseError:
-        return svg
-    tag = f"{{{SVG_NS}}}"
-    parents = {c: p for p in root.iter() for c in p}
-    for text in list(root.iter(tag + "text")):
-        size = None
-        x, y, anchor = text.get("x"), text.get("y"), text.get("text-anchor")
-        style_bits = {}
-        for el in text.iter():
-            fs = el.get("font-size")
-            if fs and fs not in ("0px", "0"):
-                size = fs
-            if x is None and el.get("x"):
-                x = el.get("x")
-            if y is None and el.get("y"):
-                y = el.get("y")
-            if anchor is None and el.get("text-anchor"):
-                anchor = el.get("text-anchor")
-            for k in ("font-style", "font-weight", "font-family"):
-                if el.get(k) and k not in style_bits:
-                    style_bits[k] = el.get(k)
-        parts = []
-        for el in text.iter():
-            if el.tag == tag + "title":
-                continue
-            if el.text:
-                parts.append(el.text)
-            if el is not text and el.tail and parents.get(el) is not None and parents[el].tag != tag + "title":
-                parts.append(el.tail)
-        content = "".join(parts).strip()
-        new = ET.Element(tag + "text")
-        if x is not None or y is not None:
-            new.set("x", x or "0")
-            new.set("y", y or "0")
-        if anchor:
-            new.set("text-anchor", anchor)
-        if size:
-            new.set("font-size", size)
-        for k, v in style_bits.items():
-            new.set(k, _first_family(v) if k == "font-family" else v)
-        cls = text.get("class")
-        if cls:
-            new.set("class", cls)
-        new.text = content
-        parent = parents.get(text)
-        if parent is not None and content:
-            idx = list(parent).index(text)
-            parent.remove(text)
-            parent.insert(idx, new)
-        elif parent is not None:
-            parent.remove(text)
-    return ET.tostring(root, encoding="unicode")
-
-
 def render_pages(xml: str, paper: tuple = PAPER[0], scale: int = 40) -> list[str]:
-    """Engrave MusicXML into SVG pages (already made Qt friendly)."""
-    import verovio
-
-    tk = verovio.toolkit()
-    tk.setOptions({"pageWidth": paper[2], "pageHeight": paper[3], "scale": scale, "adjustPageHeight": False,
-                   "footer": "none", "header": "auto", "breaks": "auto", "pageMarginLeft": 60,
-                   "pageMarginRight": 60, "pageMarginTop": 60, "pageMarginBottom": 60,
-                   "lyricSize": 4.0, "spacingSystem": 12})
-    if not tk.loadData(xml):
-        raise ValueError("Verovio could not read the notation.")
-    return [svg_for_qt(tk.renderToSVG(i)) for i in range(1, tk.getPageCount() + 1)]
+    """Engrave MusicXML into SVG pages (already made Qt friendly). Verovio runs in its own
+    process, see engrave.py for why."""
+    return engrave.render_pages(xml, paper[2], paper[3], scale)
 
 
 def paint_page(painter: QPainter, svg: str, target: QRectF) -> None:
@@ -136,8 +40,8 @@ def paint_page(painter: QPainter, svg: str, target: QRectF) -> None:
     r.render(painter, target)
 
 
-# Verovio keeps its music fonts in the thread that first used it, and fails in any other
-# thread after that. So all engraving runs on this one thread, which stays alive.
+# Engraving waits for the engraving process on this one background thread, so the window
+# stays responsive and only one engraving runs at a time.
 _engraver = None
 
 

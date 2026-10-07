@@ -23,6 +23,11 @@ Two modes:
   * Edit: move, resize, add and delete notes, and drop chords from the Chords tab.
     Nothing can be changed by accident because none of this works until Edit mode
     is switched on.
+
+In Edit mode there are tools (select, draw, erase, split, glue), a clipboard (copy, cut,
+paste at the playhead, duplicate), quantize, and a velocity lane under the grid where the
+strength of each note is a bar you can drag. One part is edited at a time: the others are
+dimmed and can't be touched, unless "Edit only this part" is switched off.
 """
 
 from __future__ import annotations
@@ -32,10 +37,10 @@ import json
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QToolTip
+from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QMenu, QToolTip
 
 from .engine import Note
-from .i18n import tr
+from .i18n import tr, tr_n
 from .music import NoteFilter, format_time, is_black, label_pc, note_label, note_name, pitch_hz
 
 MIME_CHORDS = "application/x-audioscribe-chords"
@@ -51,6 +56,8 @@ DRAG_PX = 4                 # a mouse move smaller than this is still a click
 MIN_NOTE = 0.03             # shortest note in seconds
 MIN_SPAN = 0.05
 MAX_PPS = 3000.0
+VEL_H = 70                  # the velocity lane under the grid (Edit mode)
+TOOLS = ("select", "draw", "erase", "split", "glue")
 
 COL = {
     "bg": QColor("#2A3038"),
@@ -79,7 +86,11 @@ COL = {
     "chord_block": QColor("#363E49"),
     "chord_line": QColor("#4A5361"),
     "ghost": QColor("#F0B23E"),
+    "vel_bg": QColor("#22272E"),
 }
+
+# Notes copied with Ctrl+C: (track index, start, end, pitch, strength), shared by every piano roll.
+_clipboard: list[tuple[str, float, float, int, float]] = []    # (part uid, start, end, pitch, strength)
 
 
 class _TrackIndex:
@@ -120,6 +131,8 @@ class PianoRoll(QAbstractScrollArea):
     chordsDropped = Signal(object, float) # chords dragged in from the Chords tab, and the time
     dropRefused = Signal()                # chords dragged in while Edit mode is off
     chordClicked = Signal(float, object)  # a chord in the chord lane was clicked: its start and Chord
+    toolChanged = Signal(str)             # a tool was picked with a key (1 to 5)
+    status = Signal(str)                  # a short message for the status bar
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,7 +166,10 @@ class PianoRoll(QAbstractScrollArea):
         self.loop_on = False
         self.edit_mode = False
         self.snap_div = 0           # 0 off, 1 beat, 2 half a beat, 4 quarter of a beat
-        self.edit_track = 0         # where double-click adds notes
+        self.edit_track = 0         # the part being edited: new notes go here
+        self.lock_others = True     # in Edit mode, only the edit_track's notes can be changed
+        self.tool = "select"
+        self.show_velocity = True   # the velocity lane, in Edit mode
         self.saved_view: tuple | None = None
 
         self._version = 0
@@ -188,8 +204,15 @@ class PianoRoll(QAbstractScrollArea):
     def _view_w(self) -> int:
         return max(1, self.viewport().width() - KEY_W)
 
+    def _vel_h(self) -> int:
+        return VEL_H if (self.edit_mode and self.show_velocity and self.indexes) else 0
+
+    def grid_bottom(self) -> int:
+        """Where the note grid ends (the velocity lane is below it in Edit mode)."""
+        return max(self.header_h + 1, self.viewport().height() - self._vel_h())
+
     def _view_h(self) -> int:
-        return max(1, self.viewport().height() - self.header_h)
+        return max(1, self.grid_bottom() - self.header_h)
 
     def x_of(self, t: float) -> float:
         return KEY_W + t * self.pps - self.horizontalScrollBar().value()
@@ -279,6 +302,14 @@ class PianoRoll(QAbstractScrollArea):
         self._initial_zoom()
         if self.edit_mode:
             self._add_headroom()
+
+    def set_tracks(self, tracks) -> None:
+        """Parts were added or removed (a recorded take): keeps the view where it is."""
+        self.indexes = [_TrackIndex(t) for t in tracks]
+        self.selected = {n for n in self.selected if any(n in t.notes for t in tracks)}
+        if self.message == tr("No notes to show.") and any(t.notes for t in tracks):
+            self.message = ""
+        self.refresh()
 
     def set_beats(self, beats, meter: int = 4) -> None:
         self.beats = list(beats or [])
@@ -374,12 +405,44 @@ class PianoRoll(QAbstractScrollArea):
     def _shown(self, idx: _TrackIndex, n: Note) -> bool:
         return idx.track.visible and self.filter.allows(n.pitch, idx.is_drum)
 
-    def shown_notes(self):
+    def _editable(self, ti: int) -> bool:
+        """In Edit mode with "Edit only this part", only the edit_track can be touched."""
+        return not (self.edit_mode and self.lock_others) or ti == self.edit_track
+
+    def shown_notes(self, editable_only: bool = False):
         """Every (track index, note) that is currently visible."""
         for ti, idx in enumerate(self.indexes):
+            if editable_only and not self._editable(ti):
+                continue
             for n in idx.track.notes:
                 if self._shown(idx, n):
                     yield ti, n
+
+    def set_edit_track(self, ti: int) -> None:
+        self.edit_track = ti
+        if self.lock_others and self.edit_mode:
+            keep = {n for n in self.selected if n in self.indexes[ti].track.notes} if 0 <= ti < len(self.indexes) \
+                else set()
+            if keep != self.selected:
+                self.selected = keep
+                self.selectionChanged.emit()
+        self.refresh()
+
+    def set_lock_others(self, on: bool) -> None:
+        self.lock_others = on
+        if on and self.edit_mode and 0 <= self.edit_track < len(self.indexes):
+            self.set_edit_track(self.edit_track)
+        self.refresh()
+
+    def set_tool(self, tool: str) -> None:
+        self.tool = tool if tool in TOOLS else "select"
+        self._press = None
+        self.viewport().setCursor(Qt.ArrowCursor)
+
+    def set_show_velocity(self, on: bool) -> None:
+        self.show_velocity = on
+        self._update_scrollbars()
+        self.refresh()
 
     def _track_of(self, note: Note) -> int:
         for ti, idx in enumerate(self.indexes):
@@ -451,8 +514,9 @@ class PianoRoll(QAbstractScrollArea):
             self._add_headroom()
         else:
             self.clear_selection()
+        self._update_scrollbars()
         self.viewport().setCursor(Qt.ArrowCursor)
-        self.viewport().update()
+        self.refresh()
 
     def _add_headroom(self) -> None:
         """Extra empty rows above and below, so notes can be moved up or down."""
@@ -481,9 +545,171 @@ class PianoRoll(QAbstractScrollArea):
         self.selectionChanged.emit()
 
     def select_all(self) -> None:
-        self.selected = {n for _, n in self.shown_notes()}
+        self.selected = {n for _, n in self.shown_notes(editable_only=True)}
         self.refresh()
         self.selectionChanged.emit()
+
+    def select_pitch(self, pitch: int) -> None:
+        """Every editable note of this pitch."""
+        self.selected = {n for _, n in self.shown_notes(editable_only=True) if n.pitch == pitch}
+        self.refresh()
+        self.selectionChanged.emit()
+
+    # Clipboard ---------------------------------------------------------------------
+
+    def copy_selected(self) -> int:
+        notes = self.selected_notes()
+        if not notes:
+            return 0
+        _clipboard[:] = [(self.indexes[self._track_of(n)].track.uid, n.start, n.end, n.pitch, n.velocity)
+                         for n in notes]
+        return len(notes)
+
+    def cut_selected(self) -> int:
+        count = self.copy_selected()
+        if count:
+            self.delete_selected()
+        return count
+
+    def _grid_step(self) -> float:
+        period = self.beat_period()
+        if period and self.snap_div:
+            return period / self.snap_div
+        return period or 0.25
+
+    def paste(self, at: float | None = None) -> int:
+        """Pastes the copied notes at the playhead (or `at`), into the part being edited."""
+        if not _clipboard or not self.indexes or self.duration <= 0:
+            return 0
+        t = self._clamp_t(self.snap_time(self.playhead if at is None else at))
+        first = min(row[1] for row in _clipboard)
+        parts = {row[0] for row in _clipboard}
+        target = self.edit_track if 0 <= self.edit_track < len(self.indexes) else 0
+        by_uid = {idx.track.uid: ti for ti, idx in enumerate(self.indexes)}
+        rows = []
+        for uid, a, b, pitch, vel in _clipboard:
+            # notes copied from several parts go back to their own parts unless one part is being edited
+            dest = by_uid.get(uid, target) if (len(parts) > 1 and not self.lock_others) else target
+            rows.append((dest, t + (a - first), t + (b - first), pitch, vel))
+        return self._add_rows(rows)
+
+    def duplicate_selected(self) -> int:
+        """Copies the selected notes to right after themselves (rounded up to the grid)."""
+        notes = self.selected_notes()
+        if not notes:
+            return 0
+        a, b = min(n.start for n in notes), max(n.end for n in notes)
+        step = self._grid_step()
+        length = max(step, step * round((b - a) / step + 0.4999))
+        rows = [(self._track_of(n), n.start + length, n.end + length, n.pitch, n.velocity) for n in notes]
+        return self._add_rows(rows)
+
+    def _add_rows(self, rows) -> int:
+        rows = [r for r in rows if r[1] < self.duration]
+        if not rows:
+            return 0
+        self._begin_edit()
+        new = []
+        for ti, start, end, pitch, vel in rows:
+            start = self._clamp_t(start)
+            end = min(self.duration, max(end, start + MIN_NOTE))
+            note = Note(start, end, max(LOWEST, min(HIGHEST, int(pitch))), vel, edited=True)
+            self.indexes[ti].track.notes.append(note)
+            new.append(note)
+        self.selected = set(new)
+        pitches = [n.pitch for n in new]
+        self._extend_range(min(pitches) - 2, max(pitches) + 2)
+        self._finish_edit()
+        return len(new)
+
+    # Changing notes in place ---------------------------------------------------------
+
+    def quantize_selected(self, ends: bool = True) -> int:
+        """Lines the selected notes up with the grid (the snap setting, or half beats when it is off)."""
+        notes = self.selected_notes()
+        if not notes:
+            return 0
+        div = self.snap_div or 2
+        saved, self.snap_div = self.snap_div, div
+        try:
+            step = self._grid_step()
+            moves = []
+            for n in notes:
+                start = self._clamp_t(self.snap_time(n.start))
+                end = self.snap_time(start + (n.end - n.start)) if ends else start + (n.end - n.start)
+                if end - start < MIN_NOTE:
+                    end = start + step
+                end = min(self.duration, end)
+                if abs(start - n.start) > 1e-9 or abs(end - n.end) > 1e-9:
+                    moves.append((n, start, end))
+        finally:
+            self.snap_div = saved
+        if not moves:
+            return 0
+        self._begin_edit()
+        for n, start, end in moves:
+            n.start, n.end, n.edited = start, end, True
+        self._finish_edit()
+        return len(moves)
+
+    def split_note(self, note: Note, t: float) -> bool:
+        t = self.snap_time(t)
+        if not (note.start + MIN_NOTE <= t <= note.end - MIN_NOTE):
+            t = (note.start + note.end) / 2
+            if note.end - note.start < 2 * MIN_NOTE:
+                return False
+        ti = self._track_of(note)
+        self._begin_edit()
+        tail = Note(t, note.end, note.pitch, note.velocity, edited=True)
+        note.end, note.edited = t, True
+        self.indexes[ti].track.notes.append(tail)
+        self.selected = {note, tail}
+        self._finish_edit()
+        return True
+
+    def glue(self, notes: list[Note]) -> int:
+        """Joins each note to the next one of the same pitch in the same part."""
+        if not notes:
+            return 0
+        plan = []        # (track index, {note: new end}, notes that go)
+        for ti, idx in enumerate(self.indexes):
+            pick = {n for n in notes if n in idx.track.notes}
+            if not pick:
+                continue
+            ordered = sorted(idx.track.notes, key=lambda n: (n.pitch, n.start))
+            ends, gone = {}, set()
+            for k, n in enumerate(ordered):
+                if n in gone or n not in pick:
+                    continue
+                # with one note picked, glue it to the next; with several, glue runs of picked notes
+                j = k + 1
+                while j < len(ordered) and ordered[j].pitch == n.pitch and ordered[j] not in gone:
+                    nxt = ordered[j]
+                    if len(pick) > 1 and nxt not in pick:
+                        break
+                    ends[n] = max(ends.get(n, n.end), nxt.end)
+                    gone.add(nxt)
+                    j += 1
+                    if len(pick) == 1:
+                        break
+            if gone:
+                plan.append((ti, ends, gone))
+        if not plan:
+            return 0
+        self._begin_edit()
+        joined = 0
+        for ti, ends, gone in plan:
+            for n, end in ends.items():
+                n.end, n.edited = end, True
+            track = self.indexes[ti].track
+            track.notes[:] = [n for n in track.notes if n not in gone]
+            self.selected -= gone
+            joined += len(gone)
+        self._finish_edit()
+        return joined
+
+    def transpose_selected(self, semitones: int) -> None:
+        self.nudge(semitones=semitones)
 
     def delete_selected(self) -> None:
         if not self.selected:
@@ -528,10 +754,10 @@ class PianoRoll(QAbstractScrollArea):
         self.reindex()
         self.notesEdited.emit()
 
-    def add_note_at(self, t: float, pitch: int) -> None:
+    def add_note_at(self, t: float, pitch: int) -> Note | None:
         shown = [i for i, idx in enumerate(self.indexes) if idx.track.visible]
         if not shown:
-            return
+            return None
         ti = self.edit_track if self.edit_track in shown else shown[0]
         pitch = max(LOWEST, min(HIGHEST, pitch))
         start = self._clamp_t(self.snap_time(t))
@@ -547,6 +773,7 @@ class PianoRoll(QAbstractScrollArea):
         self.selected = {note}
         self._finish_edit()
         self.auditionRequested.emit(pitch, ti)
+        return note
 
     def insert_notes(self, track_index: int, rows) -> None:
         """Add notes as one edit (used for chords from the Chords tab): (start, end, pitch, strength)."""
@@ -710,14 +937,17 @@ class PianoRoll(QAbstractScrollArea):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         vp = self.viewport()
-        w, h = vp.width(), vp.height()
+        w, full_h = vp.width(), vp.height()
+        h = self.grid_bottom()
         p = QPainter(vp)
         p.drawPixmap(0, 0, self._static_layer(w, h))
+        if self._vel_h():
+            self._paint_velocity(p, w, h, full_h)
         if self.duration > 0:
             self._paint_span(p, w, h)
             self._paint_marquee(p, w, h)
             self._paint_ghost(p, w, h)
-            self._paint_playhead(p, h)
+            self._paint_playhead(p, full_h)
             if self.lane:
                 self._paint_lane(p, w)
             if self.chord_lane:
@@ -727,19 +957,27 @@ class PianoRoll(QAbstractScrollArea):
             p.fillRect(KEY_W, 0, w - KEY_W, self.header_h, COL["panel"])
         self._paint_keyboard(p, h)
         self._paint_corner(p)
+        if self._vel_h():
+            p.fillRect(QRectF(0, h, KEY_W, full_h - h), COL["panel"])
+            p.setPen(COL["muted"])
+            p.setFont(self.small_font)
+            p.drawText(QRectF(4, h + 4, KEY_W - 8, 16), Qt.AlignLeft | Qt.AlignVCenter, tr("Strength"))
+            p.setPen(COL["panel_line"])
+            p.drawLine(QPointF(KEY_W - 0.5, h), QPointF(KEY_W - 0.5, full_h))
         if self.edit_mode:
             p.setPen(QPen(COL["edit"], 2))
             p.setBrush(Qt.NoBrush)
-            p.drawRect(1, 1, w - 2, h - 2)
+            p.drawRect(1, 1, w - 2, full_h - 2)
         p.end()
 
     def _static_layer(self, w: int, h: int) -> QPixmap:
+        """Rows, grid and notes, down to h (the top of the velocity lane)."""
         dpr = self.viewport().devicePixelRatioF()
         key = (w, h, dpr, self.horizontalScrollBar().value(), self.verticalScrollBar().value(),
                self.pps, self.row_h, self.header_h, self._version)
         if self._cache is not None and self._cache_key == key:
             return self._cache
-        pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
+        pm = QPixmap(max(1, int(w * dpr)), max(1, int(self.viewport().height() * dpr)))
         pm.setDevicePixelRatio(dpr)
         pm.fill(COL["bg"])
         p = QPainter(pm)
@@ -831,13 +1069,14 @@ class PianoRoll(QAbstractScrollArea):
         amber = QPen(COL["playhead"], 1.6)
         edited = QPen(QColor(255, 255, 255, 215), 1.3)
         flt = self.filter
-        for idx in self.indexes:
+        for ti, idx in enumerate(self.indexes):
             if not idx.track.visible:
                 continue
             base = idx.color
             edge = QPen(base.lighter(125), 1.0)
             notes = idx.track.notes
             part = idx.track.name
+            locked = not self._editable(ti)
             for ni in idx.in_range(t0, t1):
                 n = notes[ni]
                 if n.end < t0 or not flt.allows(n.pitch, idx.is_drum):
@@ -847,7 +1086,7 @@ class PianoRoll(QAbstractScrollArea):
                     continue
                 x0, x1 = self.x_of(n.start), self.x_of(n.end)
                 rect = QRectF(x0, y + 1, max(2.0, x1 - x0), rh - 2)
-                dim = self.highlight_pitch is not None and n.pitch != self.highlight_pitch
+                dim = locked or (self.highlight_pitch is not None and n.pitch != self.highlight_pitch)
                 fill = QColor(base)
                 fill.setAlphaF(0.14 if dim else 0.45 + 0.55 * n.velocity)
                 p.setBrush(fill)
@@ -981,6 +1220,42 @@ class PianoRoll(QAbstractScrollArea):
                 p.drawText(rect.adjusted(4, 0, -2, 0), Qt.AlignLeft | Qt.AlignVCenter, name)
         p.restore()
 
+    def _velocity_notes(self, t0: float, t1: float):
+        """(track index, note) for the bars in the velocity lane."""
+        for ti, idx in enumerate(self.indexes):
+            if not idx.track.visible or not self._editable(ti):
+                continue
+            for ni in idx.in_range(t0, t1):
+                n = idx.track.notes[ni]
+                if t0 <= n.start <= t1 and self.filter.allows(n.pitch, idx.is_drum):
+                    yield ti, n
+
+    def _vel_y(self, value: float, top: int, bottom: int) -> float:
+        return bottom - 4 - value * (bottom - top - 10)
+
+    def _paint_velocity(self, p: QPainter, w: int, top: int, bottom: int) -> None:
+        p.fillRect(QRectF(KEY_W, top, w - KEY_W, bottom - top), COL["vel_bg"])
+        p.setPen(COL["panel_line"])
+        p.drawLine(QPointF(KEY_W, top + 0.5), QPointF(w, top + 0.5))
+        p.setPen(QPen(COL["row_line"], 1, Qt.DotLine))
+        for v in (0.25, 0.5, 0.75):
+            y = self._vel_y(v, top, bottom)
+            p.drawLine(QPointF(KEY_W, y), QPointF(w, y))
+        p.save()
+        p.setClipRect(QRectF(KEY_W, top + 1, w - KEY_W, bottom - top - 1))
+        p.setRenderHint(QPainter.Antialiasing, True)
+        amber = COL["playhead"]
+        for ti, n in self._velocity_notes(self.t_of(KEY_W) - 0.05, self.t_of(w)):
+            x = self.x_of(n.start)
+            y = self._vel_y(n.velocity, top, bottom)
+            color = amber if n in self.selected else self.indexes[ti].color
+            p.setPen(QPen(color, 2))
+            p.drawLine(QPointF(x, bottom - 3), QPointF(x, y))
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(QPointF(x, y), 3, 3)
+        p.restore()
+
     def _paint_ghost(self, p: QPainter, w: int, h: int) -> None:
         """Where dragged-in chords would land."""
         if not self._ghost:
@@ -1093,14 +1368,14 @@ class PianoRoll(QAbstractScrollArea):
     # Mouse --------------------------------------------------------------------
 
     def note_at(self, x: float, y: float) -> tuple[int, int] | None:
-        if y < self.header_h or x < KEY_W:
+        if y < self.header_h or x < KEY_W or y >= self.grid_bottom():
             return None
         pitch = self.pitch_at(y)
         t = self.t_of(x)
         slack = 3 / self.pps
         for ti in range(len(self.indexes) - 1, -1, -1):
             idx = self.indexes[ti]
-            if not idx.track.visible:
+            if not idx.track.visible or not self._editable(ti):
                 continue
             for ni in idx.in_range(t - slack, t + slack):
                 n = idx.track.notes[ni]
@@ -1128,8 +1403,8 @@ class PianoRoll(QAbstractScrollArea):
         ta, tb = sorted((self.t_of(x0), self.t_of(x1)))
         pa, pb = sorted((self.pitch_at(y0), self.pitch_at(y1)))
         found: set[Note] = set()
-        for idx in self.indexes:
-            if not idx.track.visible:
+        for ti, idx in enumerate(self.indexes):
+            if not idx.track.visible or not self._editable(ti):
                 continue
             notes = idx.track.notes
             for ni in idx.in_range(ta, tb):
@@ -1140,6 +1415,9 @@ class PianoRoll(QAbstractScrollArea):
         return found
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.RightButton and self.edit_mode:
+            self._context_menu(event)
+            return
         if event.button() != Qt.LeftButton:
             return
         x, y = event.position().x(), event.position().y()
@@ -1169,6 +1447,32 @@ class PianoRoll(QAbstractScrollArea):
         mods = event.modifiers()
         hit = self.note_at(x, y)
         t = self.t_of(x)
+
+        if self.edit_mode and self._vel_h() and y >= self.grid_bottom():
+            self._press = {"kind": "vel", "begun": False, "x": x}
+            self._velocity_drag(self._press, x, y)
+            return
+        if self.edit_mode and self.tool == "erase":
+            self._press = {"kind": "erase", "begun": False}
+            self._erase_at(self._press, x, y)
+            return
+        if self.edit_mode and self.tool in ("split", "glue"):
+            if hit:
+                note = self.indexes[hit[0]].track.notes[hit[1]]
+                if self.tool == "split":
+                    self.split_note(note, t)
+                else:
+                    many = note in self.selected and len(self.selected) > 1
+                    if not self.glue(list(self.selected) if many else [note]):
+                        self.status.emit(tr("There is no next note of the same pitch to glue to."))
+            return
+        if self.edit_mode and self.tool == "draw" and not hit and y < self.grid_bottom():
+            note = self.add_note_at(t, self.pitch_at(y))
+            if note is not None:
+                self._press = {"kind": "resize", "x": x, "y": y, "t": t, "note": note, "ti": self._track_of(note),
+                               "orig": [(note, note.start, note.end, note.pitch)], "begun": True,
+                               "last_pitch": note.pitch}
+            return
 
         if self.edit_mode and hit:
             ti, ni = hit
@@ -1223,6 +1527,12 @@ class PianoRoll(QAbstractScrollArea):
             # In Edit mode a drag on empty space draws a selection box (hold Shift for a span).
             kind = "marquee" if (self.edit_mode and not press["shift"]) else "span"
             press["kind"] = kind
+        if kind == "vel":
+            self._velocity_drag(press, x, y)
+            return
+        if kind == "erase":
+            self._erase_at(press, x, y)
+            return
         if kind == "span":
             self.set_span(self.snap_time(press["t"]), self.snap_time(self._clamp_t(self.t_of(x))), final=False)
         elif kind == "edge":
@@ -1288,6 +1598,16 @@ class PianoRoll(QAbstractScrollArea):
         if press is None:
             return
         kind = press["kind"]
+        if kind == "vel":
+            if press["begun"]:
+                self.reindex()
+                self.notesEdited.emit()
+                self.selectionChanged.emit()
+            return
+        if kind == "erase":
+            if press["begun"]:
+                self._finish_edit()
+            return
         if kind == "empty":
             self._click(press)
         elif kind == "span":
@@ -1314,6 +1634,87 @@ class PianoRoll(QAbstractScrollArea):
                     self.selected = {press["note"]}
                     self.refresh()
                     self.selectionChanged.emit()
+
+    def _velocity_drag(self, press: dict, x: float, y: float) -> None:
+        """Sets the strength of the notes under the mouse (only the selected ones, if any are)."""
+        top, bottom = self.grid_bottom(), self.viewport().height()
+        value = min(1.0, max(0.05, (bottom - 4 - y) / max(1, bottom - top - 10)))
+        x0, x1 = sorted((press["x"], x))
+        press["x"] = x
+        t0, t1 = self.t_of(x0 - 4), self.t_of(x1 + 4)
+        hits = [n for _ti, n in self._velocity_notes(t0, t1) if not self.selected or n in self.selected]
+        if not hits:
+            return
+        if not press["begun"]:
+            press["begun"] = True
+            self._begin_edit()
+        for n in hits:
+            n.velocity = value
+            n.edited = True
+        self.status.emit(tr("Strength {n}%").format(n=f"{value * 100:.0f}"))
+        self.refresh()
+
+    def _erase_at(self, press: dict, x: float, y: float) -> None:
+        hit = self.note_at(x, y)
+        if not hit:
+            return
+        if not press["begun"]:
+            press["begun"] = True
+            self._begin_edit()
+        idx = self.indexes[hit[0]]
+        note = idx.track.notes.pop(hit[1])
+        self.selected.discard(note)
+        idx.rebuild()
+        self.refresh()
+
+    def _context_menu(self, event) -> None:
+        x, y = event.position().x(), event.position().y()
+        hit = self.note_at(x, y)
+        t = self._clamp_t(self.t_of(x))
+        if hit:
+            note = self.indexes[hit[0]].track.notes[hit[1]]
+            if note not in self.selected:
+                self.selected = {note}
+                self.refresh()
+                self.selectionChanged.emit()
+        has = bool(self.selected)
+        menu = QMenu(self)
+
+        def add(text: str, slot, enabled: bool = True, shortcut: str = ""):
+            action = menu.addAction(tr(text) + (f"\t{shortcut}" if shortcut else ""), slot)
+            action.setEnabled(enabled)
+            return action
+
+        add("Cut", lambda: self._report_count(self.cut_selected(), "Cut"), has, "Ctrl+X")
+        add("Copy", lambda: self._report_count(self.copy_selected(), "Copied"), has, "Ctrl+C")
+        add("Paste here", lambda: self._report_count(self.paste(t), "Pasted"), bool(_clipboard))
+        add("Paste at the playhead", lambda: self._report_count(self.paste(), "Pasted"), bool(_clipboard), "Ctrl+V")
+        add("Duplicate", lambda: self._report_count(self.duplicate_selected(), "Duplicated"), has, "Ctrl+D")
+        add("Delete", self.delete_selected, has, "Del")
+        menu.addSeparator()
+        add("Quantize to the grid", lambda: self._report_count(self.quantize_selected(), "Quantized"), has, "Q")
+        add("Up an octave", lambda: self.transpose_selected(12), has, "Shift+Up")
+        add("Down an octave", lambda: self.transpose_selected(-12), has, "Shift+Down")
+        if hit:
+            note = self.indexes[hit[0]].track.notes[hit[1]]
+            add("Split here", lambda: self.split_note(note, t))
+            add("Glue to the next note", lambda: self.glue([note]))
+            menu.addSeparator()
+            add("Select every note of this pitch", lambda: self.select_pitch(note.pitch))
+        add("Select all", self.select_all, True, "Ctrl+A")
+        menu.exec(event.globalPosition().toPoint())
+
+    _REPORTS = {
+        "Cut": ("Cut {n} note.", "Cut {n} notes."),
+        "Copied": ("Copied {n} note.", "Copied {n} notes."),
+        "Pasted": ("Pasted {n} note.", "Pasted {n} notes."),
+        "Duplicated": ("Duplicated {n} note.", "Duplicated {n} notes."),
+        "Quantized": ("Lined up {n} note with the grid.", "Lined up {n} notes with the grid."),
+    }
+
+    def _report_count(self, n: int, what: str) -> None:
+        if n:
+            self.status.emit(tr_n(n, *self._REPORTS[what]))
 
     def _click(self, press: dict) -> None:
         """A press and release in the grid without a drag."""
@@ -1348,7 +1749,13 @@ class PianoRoll(QAbstractScrollArea):
         text = ""
         in_grid = x >= KEY_W and y >= self.header_h
         hit = self.note_at(x, y) if in_grid else None
-        if self.edit_mode and hit:
+        tool_cursor = {"draw": Qt.CrossCursor, "erase": Qt.PointingHandCursor, "split": Qt.SplitHCursor,
+                       "glue": Qt.SizeHorCursor}
+        if self.edit_mode and self._vel_h() and y >= self.grid_bottom() and x >= KEY_W:
+            cursor = Qt.SizeVerCursor
+        elif self.edit_mode and self.tool != "select" and in_grid:
+            cursor = tool_cursor[self.tool]
+        elif self.edit_mode and hit:
             note = self.indexes[hit[0]].track.notes[hit[1]]
             cursor = Qt.SizeHorCursor if self._near_note_end(note, x) else Qt.SizeAllCursor
         elif in_grid and self._span_edge_at(x):
@@ -1424,6 +1831,26 @@ class PianoRoll(QAbstractScrollArea):
                 return
             if key == Qt.Key_A and mods & Qt.ControlModifier:
                 self.select_all()
+                return
+            ctrl = bool(mods & Qt.ControlModifier)
+            if ctrl and key == Qt.Key_C:
+                self._report_count(self.copy_selected(), "Copied")
+                return
+            if ctrl and key == Qt.Key_X:
+                self._report_count(self.cut_selected(), "Cut")
+                return
+            if ctrl and key == Qt.Key_V:
+                self._report_count(self.paste(), "Pasted")
+                return
+            if ctrl and key == Qt.Key_D:
+                self._report_count(self.duplicate_selected(), "Duplicated")
+                return
+            if key == Qt.Key_Q and not ctrl:
+                self._report_count(self.quantize_selected(), "Quantized")
+                return
+            if not ctrl and Qt.Key_1 <= key <= Qt.Key_5:
+                self.set_tool(TOOLS[key - Qt.Key_1])
+                self.toolChanged.emit(self.tool)
                 return
             if key == Qt.Key_Up:
                 self.nudge(semitones=12 if big else 1)

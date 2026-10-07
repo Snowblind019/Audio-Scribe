@@ -20,6 +20,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -41,12 +42,19 @@ TRACK_COLORS = {
     "Bass": "#8CCB72",
     "Other": "#B39DEB",
     "Drums": "#5CC6C0",
+    "Piano": "#E8C468",
+    "Guitar": "#E89B5C",
 }
-STEM_ORDER = ["Vocals", "Bass", "Other", "Drums"]
+STEM_ORDER = ["Vocals", "Piano", "Guitar", "Bass", "Other", "Drums"]
+# The four part split can't tell instruments apart, so piano, guitar, strings and the rest are
+# all in Other. The six part split takes piano and guitar out of Other. No model separates
+# strings (violins) on their own yet, so they stay in Other either way.
+STEM_MODELS = {4: "htdemucs", 6: "htdemucs_6s"}
+SIX_ONLY = ("Piano", "Guitar")
 
 # Frequency limits (Hz) per stem. Keeping each stem to its normal range
 # removes a lot of stray notes from leftover bleed.
-NOTE_RANGES = {"Vocals": (65.0, 1400.0), "Bass": (28.0, 420.0)}
+NOTE_RANGES = {"Vocals": (65.0, 1400.0), "Bass": (28.0, 420.0), "Piano": (27.0, 4200.0), "Guitar": (75.0, 1400.0)}
 
 WHISPER_MODELS = [
     ("tiny", "Tiny (fastest)"),
@@ -99,9 +107,13 @@ class Note:
         self.pitch, self.velocity = int(self.pitch), float(self.velocity)
 
 
+def _uid() -> str:
+    return uuid.uuid4().hex[:10]
+
+
 @dataclass
 class Track:
-    """One part of the music (the full mix, or one stem) with its notes."""
+    """One part of the music (the full mix, one stem, or a take you recorded) with its notes."""
     name: str
     color: str
     notes: list[Note]
@@ -110,6 +122,15 @@ class Track:
     solo: bool = False
     instrument: str = "piano"   # the sound used when the notes are played back
     audio: str | None = None    # the recording for this part (a stem, or the original file)
+    volume_db: float = 0.0      # fader, -60 (silent) to +6
+    pan: float = 0.0            # -1 left, 0 centre, 1 right
+    offset: float = 0.0         # where the recording starts in the song (takes), in seconds
+    take: bool = False          # recorded in the app, along with the song
+    uid: str = field(default_factory=_uid)
+
+    @property
+    def drums(self) -> bool:
+        return self.name == "Drums"
 
 
 @dataclass
@@ -124,6 +145,7 @@ class Options:
     min_note_ms: int = 120
     separate: bool = False
     note_stems: list[str] = field(default_factory=lambda: ["Vocals", "Bass", "Other", "Drums"])
+    stem_count: int = 4    # 4: vocals, bass, drums, other. 6: also piano and guitar
     chords: bool = True    # find the chords in the sound
     device: str = "cpu"  # "cpu" or "cuda"
 
@@ -193,7 +215,7 @@ def friendly_error(exc: BaseException) -> str:
 # Loaded models are kept between runs so the second analysis starts faster.
 _whisper_cache: dict[tuple[str, str], object] = {}
 _pitch_model = None
-_demucs_model = None
+_demucs_models: dict[int, object] = {}
 
 
 def _load_whisper(size: str, device: str):
@@ -221,17 +243,17 @@ def _load_pitch_model():
     return _pitch_model, predict
 
 
-def _load_demucs():
-    global _demucs_model
-    if _demucs_model is None:
+def _load_demucs(stems: int = 4):
+    stems = stems if stems in STEM_MODELS else 4
+    if stems not in _demucs_models:
         from demucs.pretrained import get_model
         # "hf://" loads the safetensors release from the Demucs author's Hugging Face
         # account. Plain "htdemucs" would fall back to older pickle files if that
         # download failed, and pickle files can run code when loaded.
-        model = get_model("hf://htdemucs")
+        model = get_model(f"hf://{STEM_MODELS[stems]}")
         model.eval()
-        _demucs_model = model
-    return _demucs_model
+        _demucs_models[stems] = model
+    return _demucs_models[stems]
 
 
 class _Progress:
@@ -277,7 +299,7 @@ class Analyzer:
         if not o.notes:
             return []
         if o.separate:
-            return [s for s in STEM_ORDER if s in o.note_stems]
+            return [s for s in STEM_ORDER if s in o.note_stems and (o.stem_count == 6 or s not in SIX_ONLY)]
         return ["Full mix"]
 
     def run(self) -> Result:
@@ -375,7 +397,7 @@ class Analyzer:
     def _chords(self, files: dict[str, str], beats: list[float], duration: float) -> list:
         """Chords heard in the recording. With stems, the drums are left out first."""
         try:
-            parts = [files[n] for n in ("Vocals", "Bass", "Other") if n in files]
+            parts = [files[n] for n in STEM_ORDER if n != "Drums" and n in files]
             if parts:
                 arrays = [audio.decode(p, audiochords.SR, 1)[0] for p in parts]
                 mono = np.zeros(max(len(a) for a in arrays), dtype=np.float32)
@@ -408,7 +430,7 @@ class Analyzer:
         import torch
         from demucs.apply import apply_model
 
-        model = _load_demucs()
+        model = _load_demucs(self.options.stem_count)
         self._check()
         use_cuda = self.options.device == "cuda" and torch.cuda.is_available()
         device = "cuda" if use_cuda else "cpu"

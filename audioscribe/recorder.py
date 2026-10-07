@@ -11,7 +11,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QProgressBar,
                                QPushButton, QVBoxLayout)
@@ -38,6 +38,75 @@ def to_int16(raw: bytes, fmt: QAudioFormat) -> np.ndarray:
     if sf == QAudioFormat.UInt8:
         return ((np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128) << 8).astype("<i2")
     raise ValueError("Unsupported microphone sample format")
+
+
+class TakeRecorder(QObject):
+    """Records the microphone into a WAV file while the song plays, for a take on its own
+    track. The window decides where the take starts in the song."""
+
+    level = Signal(float)
+
+    def __init__(self, path: Path, parent=None):
+        super().__init__(parent)
+        self.path = Path(path)
+        self.source: QAudioSource | None = None
+        self.device_io = None
+        self.wav: wave.Wave_write | None = None
+        self.frames = 0
+        self.fmt: QAudioFormat | None = None
+
+    def start(self) -> str:
+        """Starts recording. Returns an error message, or "" when it is recording."""
+        device = QMediaDevices.defaultAudioInput()
+        if device.isNull():
+            return tr("No microphone was found. Plug one in and try again.")
+        fmt = device.preferredFormat()
+        if fmt.sampleFormat() not in (QAudioFormat.Int16, QAudioFormat.Int32, QAudioFormat.Float, QAudioFormat.UInt8):
+            fmt.setSampleFormat(QAudioFormat.Int16)
+        self.fmt = fmt
+        self.wav = wave.open(str(self.path), "wb")
+        self.wav.setnchannels(max(1, fmt.channelCount()))
+        self.wav.setsampwidth(2)
+        self.wav.setframerate(fmt.sampleRate())
+        self.source = QAudioSource(device, fmt, self)
+        self.source.setBufferSize(int(fmt.sampleRate() * 0.05) * max(1, fmt.bytesPerFrame()))
+        self.device_io = self.source.start()
+        if self.device_io is None:
+            self.stop()
+            self.path.unlink(missing_ok=True)
+            return tr("The microphone could not be opened.")
+        self.device_io.readyRead.connect(self._read)
+        return ""
+
+    def _read(self) -> None:
+        if self.device_io is None or self.wav is None:
+            return
+        raw = bytes(self.device_io.readAll())
+        if not raw:
+            return
+        try:
+            samples = to_int16(raw, self.fmt)
+        except ValueError:
+            return
+        self.wav.writeframes(samples.tobytes())
+        self.frames += len(samples) // max(1, self.fmt.channelCount())
+        if len(samples):
+            self.level.emit(float(np.abs(samples).max()) / 32768.0)
+
+    def seconds(self) -> float:
+        return self.frames / max(1, self.fmt.sampleRate()) if self.fmt else 0.0
+
+    def stop(self) -> float:
+        """Stops and closes the file. Returns how long the take is, in seconds."""
+        if self.source is not None:
+            self._read()
+            self.source.stop()
+            self.source = None
+            self.device_io = None
+        if self.wav is not None:
+            self.wav.close()
+            self.wav = None
+        return self.seconds()
 
 
 class RecordDialog(QDialog):

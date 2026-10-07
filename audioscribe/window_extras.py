@@ -263,8 +263,18 @@ class ExtrasMixin:
         self._translate_thread: _Worker | None = None
         self._audition_n = 0
         self._original_from_project: dict | None = None
+        self._take_rec = None            # TakeRecorder while a take is being recorded
+        self._take_from = 0.0
+        self._take_job: _Worker | None = None
 
     def _extras_clear(self) -> None:
+        if self._take_rec is not None:          # the song is closing: the take has nowhere to go
+            rec, self._take_rec = self._take_rec, None
+            rec.stop()
+            rec.path.unlink(missing_ok=True)
+            self._take_timer.stop()
+            self.rec_btn.setChecked(False)
+            self.tracks_view.canvas.recording_from = None
         self.song_key = None
         self.translation = None
         self._lane_cache = []
@@ -296,6 +306,7 @@ class ExtrasMixin:
         self.act_save_project.setEnabled(bool(r) and not busy)
         self.youtube_btn.setEnabled(not busy)
         self.record_btn.setEnabled(not busy)
+        self.rec_btn.setEnabled(bool(r) and not busy and self._project_thread is None)
         self.midi_drag.setEnabled(has_notes)
         self.act_sheet.setEnabled(has_notes)
         lane = bool(r and self._current_lane())
@@ -403,8 +414,8 @@ class ExtrasMixin:
 
     def _part_for_chords(self) -> int | None:
         tracks = self._tracks()
-        ti = self.add_to_box.currentData()
-        if ti is not None and 0 <= ti < len(tracks) and tracks[ti].visible and tracks[ti].name != "Drums":
+        ti = self._edit_index()
+        if 0 <= ti < len(tracks) and tracks[ti].visible and tracks[ti].name != "Drums":
             return ti
         for i, t in enumerate(tracks):
             if t.visible and t.name != "Drums":
@@ -456,7 +467,7 @@ class ExtrasMixin:
             self._insert_chords(chords, t)
 
     def _insert_chords_at_playhead(self, chords: list[Chord]) -> None:
-        t = self.player.position() / 1000.0
+        t = self.player.position()
         snap = self.roll._drop_time(self.roll.x_of(t)) if self.result else t
         self._insert_chords(chords, snap)
 
@@ -505,6 +516,7 @@ class ExtrasMixin:
     def _after_grid_change(self) -> None:
         r = self.result
         self.roll.set_beats(r.beats, r.meter)
+        self.tracks_view.set_beats(r.beats, r.meter)
         self._update_meta()
         self.summary.set_result(r)
         if self.roll.span:
@@ -528,9 +540,7 @@ class ExtrasMixin:
         r = self.result
         if not r:
             return
-        from PySide6.QtMultimedia import QMediaPlayer
-        playing = self.player.playbackState() == QMediaPlayer.PlayingState
-        song_t = self.player.position() / 1000.0 if playing else None
+        song_t = self.player.position() if self.player.is_playing() else None
         bpm, first = self._tapper.tap(song_t)
         if bpm is None:
             self.status_text.setText(tr("Keep tapping along with the beat..."))
@@ -546,13 +556,7 @@ class ExtrasMixin:
 
     def _on_speed_changed(self) -> None:
         rate = (self.speed_box.currentData() or 100) / 100.0
-        try:
-            from PySide6.QtMultimedia import QMediaPlayer
-            if self.player.pitchCompensationAvailability() != QMediaPlayer.PitchCompensationAvailability.Unavailable:
-                self.player.setPitchCompensation(True)
-        except AttributeError:
-            pass
-        self.player.setPlaybackRate(rate)
+        self.player.set_rate(rate)
         self.status_text.setText(tr("Playing at {n}% speed.").format(n=int(rate * 100)))
 
     # Clean up --------------------------------------------------------------------------------------------
@@ -608,7 +612,9 @@ class ExtrasMixin:
                  "sketch": [[c.to_dict() for c in line] for line in self.chords.sketch],
                  "translation": self.translation}
         if self._original:
-            state["original"] = {name: project._notes_rows(rows) for name, rows in self._original.items()}
+            names = {t.uid: t.name for t in self._tracks()}
+            state["original"] = {names[uid]: project._notes_rows(rows) for uid, rows in self._original.items()
+                                 if uid in names}
         return state
 
     def _save_project(self) -> None:
@@ -649,11 +655,12 @@ class ExtrasMixin:
         self._saved_count = edit_count
         self.status_text.setText(tr("Project saved: {path}").format(path=path))
 
-    def _run_project_job(self, job, message: str, on_done) -> None:
+    def _run_project_job(self, job, message: str, on_done,
+                         fail_text: str = "The project could not be saved or opened.") -> None:
         self._project_thread = _Worker(job, self)
         self._project_thread.progressed.connect(lambda f: self.progress.setValue(int(f * 1000)))
         self._project_thread.done.connect(on_done)
-        self._project_thread.failed.connect(self._on_project_failed)
+        self._project_thread.failed.connect(lambda m, d: self._on_project_failed(m, d, fail_text))
         self._project_thread.finished.connect(self._on_project_thread_finished)
         self.progress.setValue(0)
         self.progress.show()
@@ -661,11 +668,12 @@ class ExtrasMixin:
         self._project_thread.start()
         self._update_controls()
 
-    def _on_project_failed(self, message: str, details: str) -> None:
+    def _on_project_failed(self, message: str, details: str,
+                           fail_text: str = "The project could not be saved or opened.") -> None:
         if not message:
             self.status_text.setText(tr("Cancelled."))
             return
-        self.status_text.setText(tr("The project could not be saved or opened."))
+        self.status_text.setText(tr(fail_text))
         from .window import show_message
         show_message(self, QMessageBox.Warning, tr(message), details=details)
 
@@ -723,7 +731,7 @@ class ExtrasMixin:
             self.chords._fill_sketch()
         original = state.get("original")
         if isinstance(original, dict) and original:
-            self._original = {t.name: [(n.start, n.end, n.pitch, n.velocity, n.edited) for n in original.get(t.name, [])]
+            self._original = {t.uid: [(n.start, n.end, n.pitch, n.velocity, n.edited) for n in original.get(t.name, [])]
                               for t in self._tracks()}
         tr_state = state.get("translation")
         if isinstance(tr_state, dict) and tr_state.get("target") in ("ro", "en") and isinstance(tr_state.get("lines"), list):
@@ -764,6 +772,216 @@ class ExtrasMixin:
         self.open_file(path)
         if analyze and self.source_path and Path(path) == self.source_path:
             self.start_analysis()
+
+    # Takes: recording along with the song onto a new track ---------------------------------------------
+
+    TAKE_COLORS = ["#E0533B", "#D97BC8", "#7BC8D9", "#C8D97B", "#D9A87B", "#8F7BD9"]
+
+    def _build_record_button(self, layout) -> None:
+        self.rec_btn = QToolButton()
+        self.rec_btn.setObjectName("RecordButton")
+        self.rec_btn.setText("● Rec")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setToolTip("Record a take from your microphone while the song plays (R). It goes on its own "
+                                "track, so you can hear it with the song, set its volume, and find its notes.")
+        self.rec_btn.clicked.connect(self._toggle_take)
+        layout.addWidget(self.rec_btn)
+        self._take_timer = QTimer(self)
+        self._take_timer.setInterval(250)
+        self._take_timer.timeout.connect(self._take_tick)
+
+    def _toggle_take(self) -> None:
+        if self._take_rec is None:
+            self._start_take()
+        else:
+            self._stop_take()
+
+    def _start_take(self) -> None:
+        from .recorder import TakeRecorder
+        r = self.result
+        self.rec_btn.setChecked(False)
+        if not r:
+            self.status_text.setText(tr("Analyze a song (or open a project) first, then record a take along with it."))
+            return
+        if self._busy() or self._project_thread is not None:
+            return
+        if (self.speed_box.currentData() or 100) != 100:
+            self.status_text.setText(tr("Set Speed to 100% to record a take, so it lines up with the song."))
+            return
+        folder = Path(r.work_dir) / "takes"
+        folder.mkdir(parents=True, exist_ok=True)
+        rec = TakeRecorder(folder / f"raw-{int(time.time() * 1000)}.wav", self)
+        error = rec.start()
+        if error:
+            from .window import show_message
+            show_message(self, QMessageBox.Warning, error)
+            return
+        self._take_rec = rec
+        self._take_from = self.player.position()
+        self.rec_btn.setChecked(True)
+        self.tracks_view.canvas.recording_from = self._take_from
+        if not self.player.is_playing():
+            self.player.play()
+        self._take_timer.start()
+        self.status_text.setText(tr("Recording a take. Press Rec again (or R) to stop."))
+
+    def _take_tick(self) -> None:
+        if self._take_rec is not None:
+            self.status_text.setText(tr("Recording a take... {time}").format(time=self._fmt(self._take_rec.seconds())))
+            self.tracks_view.refresh()
+
+    def _stop_take(self) -> None:
+        rec, self._take_rec = self._take_rec, None
+        self._take_timer.stop()
+        self.rec_btn.setChecked(False)
+        self.tracks_view.canvas.recording_from = None
+        if rec is None:
+            return
+        seconds = rec.stop()
+        self.player.pause()
+        r = self.result
+        if not r or seconds < 0.3:
+            rec.path.unlink(missing_ok=True)
+            self.status_text.setText(tr("That was too short to use."))
+            self.tracks_view.refresh()
+            return
+        from . import audio
+        from .engine import SAMPLE_RATE, Track
+        try:
+            data = audio.decode(rec.path, SAMPLE_RATE, 2)
+            out = rec.path.with_name(f"take-{int(time.time() * 1000)}.wav")
+            audio.write_wav(out, data, SAMPLE_RATE)
+        except Exception as exc:
+            from .window import show_message
+            show_message(self, QMessageBox.Warning, tr("Could not use the recording."), informative=str(exc))
+            return
+        finally:
+            rec.path.unlink(missing_ok=True)
+        names = {t.name for t in r.tracks}
+        n = 1
+        while tr("Take {n}").format(n=n) in names:
+            n += 1
+        takes = sum(1 for t in r.tracks if t.take)
+        track = Track(tr("Take {n}").format(n=n), self.TAKE_COLORS[takes % len(self.TAKE_COLORS)], [], audio=str(out),
+                      offset=self._take_from, take=True, instrument="piano")
+        r.tracks.append(track)
+        self._tracks_changed()
+        self._edit_count += 1
+        self.status_text.setText(tr("Added {part}. Right-click it in the Tracks view to find its notes, "
+                                    "or hold Alt and drag it to line it up.").format(part=tr(track.name)))
+        self._show_view(1)
+
+    def _tracks_changed(self) -> None:
+        """Parts were added or removed: every view and the mixer follow."""
+        r = self.result
+        self.roll.set_tracks(r.tracks)
+        self._apply_visibility()
+        self._fill_parts(r.tracks)
+        self.tracks_view.set_data(r.duration, r.tracks, r.beats, r.meter)
+        self._refresh_edit_tracks()
+        self._rebuild_lanes()
+        self._schedule_refresh()
+        self._update_controls()
+
+    def _take_menu(self, track, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        ti = self._tracks().index(track) if track in self._tracks() else -1
+        menu.addAction(tr("Edit the notes in the piano roll"), lambda: self._edit_track_in_roll(ti))
+        if track.take:
+            menu.addSeparator()
+            find = menu.addAction(tr("Find the notes in this take"), lambda: self._find_take_notes(track))
+            find.setEnabled(self._take_job is None)
+            menu.addAction(tr("Rename..."), lambda: self._rename_take(track))
+            menu.addAction(tr("Remove this take"), lambda: self._remove_take(track))
+        menu.exec(pos)
+
+    def _rename_take(self, track) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, tr("Rename"), tr("Name"), text=tr(track.name))
+        name = (name or "").strip()[:40]
+        if not ok or not name or not name.isprintable():
+            return
+        if any(t is not track and t.name == name for t in self._tracks()) or name in ("Full mix", "Original",
+                                                                                       *self._stem_names()):
+            self.status_text.setText(tr("Another part already has that name."))
+            return
+        track.name = name
+        self._tracks_changed()
+        self._edit_count += 1
+
+    @staticmethod
+    def _stem_names() -> list[str]:
+        from .engine import STEM_ORDER
+        return list(STEM_ORDER)
+
+    def _remove_take(self, track) -> None:
+        r = self.result
+        if not r or track not in r.tracks:
+            return
+        answer = QMessageBox.question(self, APP_NAME, tr("Remove {part}? This can't be undone.").format(
+            part=tr(track.name)))
+        if answer != QMessageBox.Yes:
+            return
+        r.tracks.remove(track)
+        self._tracks_changed()
+        self._edit_count += 1
+
+    def _on_take_moved(self, track, old_offset: float) -> None:
+        """A take was dragged: its notes move with it, and the mixer plays it from the new place."""
+        delta = track.offset - old_offset
+        if abs(delta) < 1e-6:
+            return
+        new_offset, track.offset = track.offset, old_offset
+        self._on_edit_started()            # the undo step remembers where it was
+        track.offset = new_offset
+        end = self.result.duration
+        for n in track.notes:
+            n.start, n.end = n.start + delta, min(end, n.end + delta)
+        # notes pushed past the end of the song are left out (undo brings them back)
+        track.notes[:] = [n for n in track.notes if n.start < end - 0.01]
+        self.roll.reindex()
+        self._after_notes_changed()
+        self._rebuild_lanes()
+        self.status_text.setText(tr("{part} now starts at {time}.").format(part=tr(track.name),
+                                                                           time=self._fmt(track.offset)))
+
+    def _find_take_notes(self, track) -> None:
+        r = self.result
+        if not r or not track.audio or self._take_job is not None:
+            return
+        from .engine import Analyzer, Options
+        opts = Options(sensitivity=self.sens.value(), min_note_ms=self.min_len.value())
+        wav, offset, work = track.audio, track.offset, r.work_dir
+
+        def job(report, should_stop):
+            from .engine import Note
+            notes = Analyzer(wav, opts, work)._notes(wav, track.name)
+            return [Note(n.start + offset, n.end + offset, n.pitch, n.velocity) for n in notes
+                    if n.start + offset >= 0]
+
+        def done(notes):
+            if self.result is not r or track not in r.tracks:
+                return
+            self._on_edit_started()
+            track.notes[:] = notes
+            self.roll.reindex()
+            self._after_notes_changed()
+            self.status_text.setText(tr_n(len(notes), "Found {n} note in {part}.", "Found {n} notes in {part}.")
+                                     .replace("{part}", tr(track.name)))
+
+        self._take_job = _Worker(job, self)
+        self._take_job.done.connect(done)
+        self._take_job.failed.connect(lambda m, d: m and self.status_text.setText(
+            tr("Could not find the notes: {error}").format(error=m)))
+        self._take_job.finished.connect(self._on_take_job_finished)
+        self.status_text.setText(tr("Finding the notes in {part}...").format(part=tr(track.name)))
+        self._take_job.start()
+
+    def _on_take_job_finished(self) -> None:
+        if self._take_job is not None:
+            self._take_job.deleteLater()
+        self._take_job = None
 
     # MIDI drag out ----------------------------------------------------------------------------------------
 

@@ -994,4 +994,155 @@ RO: dict[str, str] = {
         "Actualizarea nu a putut fi instalată, așa că nu s-a schimbat nimic.",
     "Audio Scribe was updated, but updating its packages failed. Run the installer again to finish (install.sh, or install.bat on Windows).":
         "Audio Scribe a fost actualizat, dar actualizarea pachetelor a eșuat. Rulează din nou instalarea ca să termini (install.sh, sau install.bat pe Windows).",
+
+    # Six stems --------------------------------------------------------------------------------
+    "Piano": "Pian",
+    "Guitar": "Chitară",
+    "Split into": "Împarte în",
+    "4 parts": "4 părți",
+    "6 parts (adds piano, guitar)": "6 părți (plus pian, chitară)",
+    "4 parts: vocals, bass, drums, and everything else.\n6 parts: also takes piano and guitar out of everything else. Slower, and the first time it downloads another model.":
+        "4 părți: voce, bas, tobe și restul.\n6 părți: scoate din rest și pianul și chitara. Mai lent, iar prima dată descarcă un alt model.",
+    "Only with 6 parts": "Doar cu 6 părți",
+    "Separates vocals, bass, drums, and the rest (and with 6 parts also piano and guitar) before analyzing. Slower, but gives much cleaner words and notes on full songs. Strings like violins stay in Other: no model can split them out yet.":
+        "Separă vocea, basul, tobele și restul (iar cu 6 părți și pianul și chitara) înainte de analiză. Mai lent, dar dă cuvinte și note mult mai curate la melodii întregi. Coardele, cum ar fi viorile, rămân în Restul: niciun model nu le poate separa încă.",
+
+    # Live mixer, Mixer tab ---------------------------------------------------------------------
+    "Mixer": "Mixer",
+    "Master": "Master",
+    "Centre": "Centru",
+    "L {n}": "S {n}",
+    "R {n}": "D {n}",
+    "Volume. Double-click for 0 dB.": "Volum. Dublu clic pentru 0 dB.",
+    "Pan: left or right. Double-click to centre.": "Panoramare: stânga sau dreapta. Dublu clic pentru centru.",
+    "The volume in the bottom bar is the master.": "Volumul din bara de jos este cel general (master).",
+    "The parts of the song show up here once the notes have been found (or the song was split into stems).":
+        "Părțile melodiei apar aici după ce au fost găsite notele (sau melodia a fost separată pe stem-uri).",
+    "Getting the file ready to play...": "Pregătesc fișierul pentru redare...",
+    "This file can't be played here, but you can still analyze it.": "Fișierul nu poate fi redat aici, dar îl poți analiza.",
+    "No sound output was found.": "Nu a fost găsită nicio ieșire de sunet.",
+    "Preparing the sound...": "Pregătesc sunetul...",
+
+    # Tracks view --------------------------------------------------------------------------------
+    "Piano roll": "Pian roll",
+    "Tracks": "Piste",
+    "The notes of every part on one keyboard (F1)": "Notele tuturor părților pe o singură claviatură (F1)",
+    "Every part as a lane with its waveform, volume and pan, like a DAW (F2)":
+        "Fiecare parte pe pista ei, cu forma de undă, volum și panoramare, ca într-un DAW (F2)",
+    "Vol": "Vol",
+    "Pan": "Pan",
+    "Right-click for more": "Clic dreapta pentru mai multe",
+    "muted": "pe mut",
+    "Hold Alt and drag to move this take": "Ține apăsat Alt și trage ca să muți această înregistrare",
+    "The parts show up here after an analysis.": "Părțile apar aici după o analiză.",
+    "{part} is muted. Unmute it to edit its notes.": "{part} este pe mut. Scoate-o de pe mut ca să-i editezi notele.",
+
+    # Recording takes ----------------------------------------------------------------------------
+    "● Rec": "● Înreg.",
+    "Record a take from your microphone while the song plays (R). It goes on its own track, so you can hear it with the song, set its volume, and find its notes.":
+        "Înregistrează de la microfon în timp ce cântă melodia (R). Înregistrarea merge pe pista ei, ca s-o auzi cu melodia, să-i potrivești volumul și să-i găsești notele.",
+    "Analyze a song (or open a project) first, then record a take along with it.":
+        "Analizează întâi o melodie (sau deschide un proiect), apoi înregistrează peste ea.",
+    "Recording a take. Press Rec again (or R) to stop.": "Înregistrez. Apasă din nou Înreg. (sau R) ca să oprești.",
+    "Recording a take... {time}": "Înregistrez... {time}",
+    "Could not use the recording.": "Înregistrarea nu a putut fi folosită.",
+    "Take {n}": "Înregistrarea {n}",
+    "Added {part}. Right-click it in the Tracks view to find its notes, or hold Alt and drag it to line it up.":
+        "Am adăugat {part}. Clic dreapta pe ea în Piste ca să-i găsești notele, sau ține Alt și trage ca s-o aliniezi.",
+    "Edit the notes in the piano roll": "Editează notele în pian roll",
+    "Find the notes in this take": "Găsește notele din această înregistrare",
+    "Rename...": "Redenumește...",
+    "Rename": "Redenumește",
+    "Name": "Nume",
+    "Remove this take": "Șterge această înregistrare",
+    "Another part already has that name.": "O altă parte are deja acest nume.",
+    "Remove {part}? This can't be undone.": "Ștergi {part}? Nu se poate anula.",
+    "{part} now starts at {time}.": "{part} începe acum la {time}.",
+    "Found {n} note in {part}.": "Am găsit {n} notă în {part}.",
+    "Found {n} notes in {part}.": "Am găsit {n} {de}note în {part}.",
+    "Could not find the notes: {error}": "Notele nu au putut fi găsite: {error}",
+    "Finding the notes in {part}...": "Caut notele în {part}...",
+    "No microphone was found. Plug one in and try again.": "Nu a fost găsit niciun microfon. Conectează unul și încearcă din nou.",
+
+    # Bounce ------------------------------------------------------------------------------------
+    "Bounce: mix or parts as WAV or FLAC (what you hear)...": "Export audio: mixajul sau părțile ca WAV sau FLAC (ce auzi)...",
+    "Bounce (save what you hear)": "Export audio (salvează ce auzi)",
+    "Saves the sound with your volumes, pans, mutes and solos, and the Play setting (recording, notes on instruments, or both).":
+        "Salvează sunetul cu volumele, panoramările, mut și solo, și setarea Redă (înregistrarea, notele pe instrumente sau ambele).",
+    "The whole mix, in one file": "Tot mixajul, într-un fișier",
+    "Each part in its own file": "Fiecare parte în fișierul ei",
+    "The whole song": "Toată melodia",
+    "WAV (16-bit)": "WAV (16 biți)",
+    "FLAC (lossless, smaller)": "FLAC (fără pierderi, mai mic)",
+    "Save": "Salvează",
+    "Format": "Format",
+    "Each part on its own keeps its volume and pan, but not the master volume.":
+        "Fiecare parte separată își păstrează volumul și panoramarea, dar nu și volumul general.",
+    "Bounce...": "Exportă...",
+    "Choose a folder for the parts": "Alege un dosar pentru părți",
+    "Save what you hear": "Salvează ce auzi",
+    "FLAC files (*.flac)": "Fișiere FLAC (*.flac)",
+    "Saved {n} file to {folder}": "Am salvat {n} fișier în {folder}",
+    "Saved {n} files to {folder}": "Am salvat {n} {de}fișiere în {folder}",
+    "Bouncing...": "Export...",
+    "Could not save the sound.": "Sunetul nu a putut fi salvat.",
+
+    # Editor -------------------------------------------------------------------------------------
+    "Select": "Selectează",
+    "Draw": "Desenează",
+    "Erase": "Șterge",
+    "Split": "Taie",
+    "Glue": "Lipește",
+    "Select, move and resize notes. Drag on empty space to select a box (1)":
+        "Selectează, mută și redimensionează note. Trage pe un loc gol ca să selectezi o zonă (1)",
+    "Click to add a note, drag to set its length (2)": "Clic ca să adaugi o notă, trage ca să-i stabilești durata (2)",
+    "Click or drag over notes to remove them (3)": "Clic sau trage peste note ca să le ștergi (3)",
+    "Click a note to cut it in two there (4)": "Clic pe o notă ca s-o tai în două acolo (4)",
+    "Click a note to join it to the next note of the same pitch (5)":
+        "Clic pe o notă ca s-o lipești de următoarea notă de aceeași înălțime (5)",
+    "The part being edited. New and pasted notes go into it.": "Partea editată. Notele noi și cele lipite merg în ea.",
+    "Only this part": "Doar această parte",
+    "Other parts are dimmed and can't be changed by accident": "Celelalte părți sunt estompate și nu pot fi schimbate din greșeală",
+    "Strength lane": "Bandă de intensitate",
+    "Show each note's strength as a bar under the notes. Drag the bars to change it.":
+        "Arată intensitatea fiecărei note ca o bară sub note. Trage barele ca s-o schimbi.",
+    "Quantize": "Cuantizează",
+    "Line the selected notes up with the grid (Q). Uses the Snap setting, or half beats when Snap is off.":
+        "Aliniază notele selectate la grilă (Q). Folosește setarea Aliniere, sau jumătăți de timp când Alinierea e oprită.",
+    "Select tool: drag notes to move them, drag their right edge to resize.":
+        "Unealta Selectează: trage notele ca să le muți, trage marginea din dreapta ca să le redimensionezi.",
+    "Draw tool: click to add a note to the part being edited, drag to set its length.":
+        "Unealta Desenează: clic ca să adaugi o notă în partea editată, trage ca să-i stabilești durata.",
+    "Erase tool: click or drag over notes to remove them.": "Unealta Șterge: clic sau trage peste note ca să le ștergi.",
+    "Split tool: click a note where it should be cut in two.": "Unealta Taie: clic pe o notă acolo unde trebuie tăiată în două.",
+    "Glue tool: click a note to join it to the next note of the same pitch.":
+        "Unealta Lipește: clic pe o notă ca s-o lipești de următoarea notă de aceeași înălțime.",
+    "Edit mode. Drag a note to move it, drag its right edge to resize, double-click empty space to add one, right-click for copy, paste, quantize and more. Hold Shift and drag for a span.":
+        "Mod editare. Trage o notă ca s-o muți, trage marginea din dreapta ca s-o redimensionezi, dublu clic pe un loc gol ca să adaugi una, clic dreapta pentru copiere, lipire, cuantizare și altele. Ține Shift și trage pentru o porțiune.",
+    "Cut": "Decupează",
+    "Copy": "Copiază",
+    "Paste here": "Lipește aici",
+    "Paste at the playhead": "Lipește la cursorul de redare",
+    "Duplicate": "Dublează",
+    "Delete": "Șterge",
+    "Quantize to the grid": "Cuantizează la grilă",
+    "Up an octave": "O octavă mai sus",
+    "Down an octave": "O octavă mai jos",
+    "Split here": "Taie aici",
+    "Glue to the next note": "Lipește de nota următoare",
+    "Select every note of this pitch": "Selectează toate notele de această înălțime",
+    "Select all": "Selectează tot",
+    "There is no next note of the same pitch to glue to.": "Nu există o notă următoare de aceeași înălțime de care să fie lipită.",
+    "Cut {n} note.": "Am decupat {n} notă.",
+    "Cut {n} notes.": "Am decupat {n} {de}note.",
+    "Copied {n} note.": "Am copiat {n} notă.",
+    "Copied {n} notes.": "Am copiat {n} {de}note.",
+    "Pasted {n} note.": "Am lipit {n} notă.",
+    "Pasted {n} notes.": "Am lipit {n} {de}note.",
+    "Duplicated {n} note.": "Am dublat {n} notă.",
+    "Duplicated {n} notes.": "Am dublat {n} {de}note.",
+    "Lined up {n} note with the grid.": "Am aliniat {n} notă la grilă.",
+    "Lined up {n} notes with the grid.": "Am aliniat {n} {de}note la grilă.",
+    "Set Speed to 100% to record a take, so it lines up with the song.":
+        "Pune Viteza la 100% ca să înregistrezi, ca înregistrarea să se potrivească cu melodia.",
 }

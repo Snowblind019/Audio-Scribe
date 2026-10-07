@@ -6,7 +6,8 @@ the app, and the audio (the recording and any stems, stored losslessly as FLAC).
 
 The file is a zip with a fixed layout:
     project.json          the data (plain JSON, no code)
-    audio/<name>.flac     one per stem: original, vocals, bass, other, drums
+    audio/<name>.flac     one per stem: original, vocals, piano, guitar, bass, other, drums
+    audio/take-<n>.flac   one per take recorded in the app (version 2)
 
 Opening a project only ever reads those names, checks every value before using it, and
 refuses files that are oversized, so a damaged or hostile file can't do anything beyond
@@ -31,10 +32,11 @@ from .music import KeyEstimate
 from .theory import Chord
 
 FORMAT = "audio-scribe-project"
-VERSION = 1
+VERSION = 2          # 2: volume, pan, piano and guitar stems, recorded takes
 SUFFIX = ".ascribe"
-STEMS = ["Original", "Vocals", "Bass", "Other", "Drums"]
-_MEMBER_RE = re.compile(r"^audio/(original|vocals|bass|other|drums)\.flac$")
+STEMS = ["Original", "Vocals", "Piano", "Guitar", "Bass", "Other", "Drums"]
+_MEMBER_RE = re.compile(r"^audio/(original|vocals|piano|guitar|bass|other|drums|take-\d{1,3})\.flac$")
+MAX_TRACKS = 64
 MAX_JSON = 64 * 1024 * 1024
 MAX_MEMBER = 3 * 1024 * 1024 * 1024
 MAX_TOTAL = 8 * 1024 * 1024 * 1024
@@ -83,6 +85,18 @@ def _chords(lane) -> list:
     return [[round(a, 4), round(b, 4), c.to_dict() if c else None] for a, b, c in lane]
 
 
+def _take_member(index: int) -> str:
+    return f"audio/take-{index}.flac"
+
+
+def _track_json(t: Track, index: int) -> dict:
+    out = {"name": t.name, "color": t.color, "instrument": t.instrument, "muted": t.muted, "solo": t.solo,
+           "notes": _notes(t.notes), "volume_db": round(t.volume_db, 2), "pan": round(t.pan, 3)}
+    if t.take:
+        out.update(take=True, offset=round(t.offset, 5), audio=_take_member(index))
+    return out
+
+
 def to_json(r: Result, state: dict) -> dict:
     return {
         "format": FORMAT,
@@ -106,8 +120,7 @@ def to_json(r: Result, state: dict) -> dict:
                                             "alternative": list(r.key.alternative) if r.key.alternative else None},
         "segments": [{"start": s.start, "end": s.end, "text": s.text,
                       "words": [[w.start, w.end, w.text] for w in s.words]} for s in r.segments],
-        "tracks": [{"name": t.name, "color": t.color, "instrument": t.instrument, "muted": t.muted, "solo": t.solo,
-                    "notes": _notes(t.notes)} for t in r.tracks],
+        "tracks": [_track_json(t, i) for i, t in enumerate(r.tracks)],
         "chords": _chords(r.chords),
         "audio": [name for name in STEMS if name in r.audio_files],
         "state": state,
@@ -122,19 +135,22 @@ def save(path: str | Path, r: Result, state: dict, report: Callable[[float], Non
     tmp_dir = Path(r.work_dir) / f"save-{int(time.time() * 1000)}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     names = [n for n in STEMS if n in r.audio_files]
+    # every piece of audio: (where it is now, its name in the project)
+    pieces = [(r.audio_files[n], f"audio/{n.lower()}.flac") for n in names]
+    pieces += [(t.audio, _take_member(i)) for i, t in enumerate(r.tracks) if t.take and t.audio]
     try:
         with zipfile.ZipFile(part, "w") as z:
             z.writestr("project.json", json.dumps(to_json(r, state), ensure_ascii=False),
                        compress_type=zipfile.ZIP_DEFLATED)
-            for i, name in enumerate(names):
+            for i, (src, member) in enumerate(pieces):
                 if should_stop and should_stop():
                     raise Stopped()
-                flac = tmp_dir / f"{name.lower()}.flac"
-                _encode_flac(r.audio_files[name], flac)
-                z.write(flac, f"audio/{name.lower()}.flac", compress_type=zipfile.ZIP_STORED)
+                flac = tmp_dir / f"piece-{i}.flac"
+                _encode_flac(src, flac)
+                z.write(flac, member, compress_type=zipfile.ZIP_STORED)
                 flac.unlink(missing_ok=True)
                 if report:
-                    report((i + 1) / max(1, len(names)))
+                    report((i + 1) / max(1, len(pieces)))
         os.replace(part, path)
     finally:
         part.unlink(missing_ok=True)
@@ -277,7 +293,7 @@ def load(path: str | Path, work_dir: str | Path, report: Callable[[float], None]
             segments.append(Segment(_num(s.get("start"), 0, duration + 1), _num(s.get("end"), 0, duration + 1),
                                     _str(s.get("text"), 20_000), words))
 
-        wanted = {m.split("/")[1].split(".")[0] for m in members}
+        wanted = {m.split("/")[1].split(".")[0] for m in members if not m.startswith("audio/take-")}
         files: dict[str, str] = {}
         for i, name in enumerate(n for n in STEMS if n.lower() in wanted):
             if should_stop and should_stop():
@@ -299,14 +315,33 @@ def load(path: str | Path, work_dir: str | Path, report: Callable[[float], None]
                 report((i + 1) / max(1, len(wanted)))
         if "Original" not in files:
             raise BadProject("The project has no audio.")
+        take_files: dict[str, str] = {}
+        for member in sorted(m for m in members if m.startswith("audio/take-")):
+            if should_stop and should_stop():
+                raise Stopped()
+            stem = member.split("/")[1].split(".")[0]
+            flac = work_dir / f"{stem}.flac"
+            with z.open(member) as src, open(flac, "wb") as dst:
+                copied = 0
+                while chunk := src.read(1 << 20):
+                    copied += len(chunk)
+                    if copied > MAX_MEMBER:
+                        raise BadProject("A file inside the project is too large.")
+                    dst.write(chunk)
+            wav = work_dir / f"{stem}.wav"
+            audio.write_wav(wav, audio.decode(flac, SAMPLE_RATE, 2, max_seconds=duration + 5.0), SAMPLE_RATE)
+            flac.unlink(missing_ok=True)
+            take_files[member] = str(wav)
 
         tracks = []
         names_seen = set()
-        for t in _list(data.get("tracks", []), 8, "parts"):
+        for t in _list(data.get("tracks", []), MAX_TRACKS, "parts"):
             if not isinstance(t, dict):
                 raise BadProject("Bad part in the project file.")
             name = _str(t.get("name"), 40, "part name")
-            if name not in ("Full mix", *STEMS[1:]) or name in names_seen:
+            take = _bool(t.get("take", False), "take flag")
+            if name in names_seen or not name.strip() or (not take and name not in ("Full mix", *STEMS[1:])) \
+                    or (take and (name in ("Full mix", *STEMS) or not name.isprintable())):
                 raise BadProject("Bad part in the project file.")
             names_seen.add(name)
             color = _str(t.get("color"), 9, "color")
@@ -316,10 +351,20 @@ def load(path: str | Path, work_dir: str | Path, report: Callable[[float], None]
             instrument = _str(t.get("instrument"), 32, "instrument")
             if instrument not in BY_KEY:
                 instrument = "piano"
-            audio_path = files.get(name, files["Original"] if name == "Full mix" else None)
+            offset = 0.0
+            if take:
+                member = _str(t.get("audio"), 40, "take audio")
+                if member not in members or not member.startswith("audio/take-"):
+                    raise BadProject("Bad take in the project file.")
+                audio_path = take_files.get(member)
+                offset = _num(t.get("offset", 0.0), -duration, duration, "take start")
+            else:
+                audio_path = files.get(name, files["Original"] if name == "Full mix" else None)
             tracks.append(Track(name, color, _parse_notes(t.get("notes", []), duration),
                                 muted=_bool(t.get("muted", False)), solo=_bool(t.get("solo", False)),
-                                instrument=instrument, audio=audio_path))
+                                instrument=instrument, audio=audio_path,
+                                volume_db=_num(t.get("volume_db", 0.0), -60, 12, "volume"),
+                                pan=_num(t.get("pan", 0.0), -1, 1, "pan"), offset=offset, take=take))
 
         key = None
         if data.get("key") is not None:

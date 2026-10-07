@@ -85,6 +85,22 @@ QToolButton#LoopButton {{
 }}
 QToolButton#LoopButton:checked {{ background: #5CC6C0; border-color: #5CC6C0; color: #0E2220; }}
 QToolButton#LoopButton:disabled, QToolButton#ModeButton:disabled {{ color: #646D79; }}
+QToolButton#RecordButton {{
+    background: {raised}; border: 1px solid {line}; border-radius: 4px; padding: 3px 9px; font-weight: 700;
+    color: #E0533B;
+}}
+QToolButton#RecordButton:checked {{ background: #E0533B; border-color: #E0533B; color: #FFFFFF; }}
+QToolButton#ToolButton {{
+    background: {raised}; border: 1px solid {line}; border-radius: 4px; padding: 3px 8px;
+}}
+QToolButton#ToolButton:checked {{ background: {select}; border-color: #5E86B3; color: #FFFFFF; }}
+QToolButton#ViewButton {{
+    background: transparent; border: 1px solid {line}; padding: 4px 12px; color: {muted}; font-weight: 600;
+}}
+QToolButton#ViewButton:checked {{ background: {raised}; color: {text}; border-color: {accent}; }}
+QFrame#ChannelStrip {{ background: {panel}; border: 1px solid {line}; border-radius: 6px; }}
+QFrame#ChannelStrip[dimmed="true"] QLabel#StripName {{ color: {muted}; }}
+QLabel#StripName {{ font-weight: 600; }}
 """.format(**COLORS)
 
 

@@ -579,8 +579,11 @@ def instrument(key: str | None) -> Instrument:
     return BY_KEY.get(key or "", BY_KEY[DEFAULT_INSTRUMENT])
 
 
+_PART_SOUNDS = {"Drums": DRUM_KEY, "Bass": "bass", "Guitar": "guitar", "Piano": "grand"}
+
+
 def default_instrument_for(part_name: str) -> str:
-    return DRUM_KEY if part_name == "Drums" else DEFAULT_INSTRUMENT
+    return _PART_SOUNDS.get(part_name, DEFAULT_INSTRUMENT)
 
 
 # Rendering notes ---------------------------------------------------------------------

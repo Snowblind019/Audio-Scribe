@@ -3,4 +3,4 @@
 APP_NAME = "Audio Scribe"
 APP_ID = "audio-scribe"
 ORG_NAME = "AudioScribe"
-__version__ = "2.0.1"
+__version__ = "2.1.0"
